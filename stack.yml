@@ -1,0 +1,129 @@
+# VideoSearcher OpenFaaS Stack
+#
+# Build images manually with:
+#   docker build -f ffmpeg-0/Dockerfile -t videosearcher/ffmpeg-0:latest .
+#   (repeat for each function — see build.sh)
+#
+# Deploy:  faas-cli deploy -f stack.yml
+# Invoke:  curl -X POST http://127.0.0.1:8080/function/ffmpeg-0 \
+#            -d '{"input":"/mnt/data/video.mp4","output":"/mnt/data/out/ffmpeg0"}'
+
+provider:
+  name: openfaas
+  gateway: http://127.0.0.1:8080
+
+functions:
+
+  # ── Stage 0: Split audio + video from input ──────────────────────────
+  ffmpeg-0:
+    skip_build: true
+    image: soumyadeeps/ffmpeg-0:latest
+    environment:
+      write_timeout: "600s"
+      read_timeout: "600s"
+      exec_timeout: "600s"
+    labels:
+      com.openfaas.scale.min: "1"
+      com.openfaas.scale.max: "5"
+    annotations:
+      com.openfaas.health.http.initialDelay: "10s"
+    limits:
+      memory: 512Mi
+    requests:
+      memory: 256Mi
+
+  # ── Stage 1: Cut video into clips using timestamps ───────────────────
+  ffmpeg-1:
+    skip_build: true
+    image: soumyadeeps/ffmpeg-1:latest
+    environment:
+      write_timeout: "600s"
+      read_timeout: "600s"
+      exec_timeout: "600s"
+    labels:
+      com.openfaas.scale.min: "1"
+      com.openfaas.scale.max: "5"
+    limits:
+      memory: 512Mi
+    requests:
+      memory: 128Mi
+
+  # ── Stage 2: Downsample audio + compress video per clip ──────────────
+  ffmpeg-2:
+    skip_build: true
+    image: soumyadeeps/ffmpeg-2:latest
+    environment:
+      write_timeout: "600s"
+      read_timeout: "600s"
+      exec_timeout: "600s"
+    labels:
+      com.openfaas.scale.min: "1"
+      com.openfaas.scale.max: "5"
+    limits:
+      memory: 512Mi
+    requests:
+      memory: 128Mi
+
+  # ── Stage 3: Extract frames from clip ────────────────────────────────
+  ffmpeg-3:
+    skip_build: true
+    image: soumyadeeps/ffmpeg-3:latest
+    environment:
+      write_timeout: "600s"
+      read_timeout: "600s"
+      exec_timeout: "600s"
+    labels:
+      com.openfaas.scale.min: "1"
+      com.openfaas.scale.max: "5"
+    limits:
+      memory: 512Mi
+    requests:
+      memory: 128Mi
+
+  # ── Librosa: Detect speech timestamps ────────────────────────────────
+  librosa-fn:
+    skip_build: true
+    image: soumyadeeps/librosa-fn:latest
+    environment:
+      write_timeout: "600s"
+      read_timeout: "600s"
+      exec_timeout: "600s"
+    labels:
+      com.openfaas.scale.min: "1"
+      com.openfaas.scale.max: "3"
+    limits:
+      memory: 1Gi
+    requests:
+      memory: 128Mi
+
+  # ── DeepSpeech: Speech-to-text transcription ─────────────────────────
+  deepspeech-fn:
+    skip_build: true
+    image: soumyadeeps/deepspeech-fn:latest
+    environment:
+      write_timeout: "600s"
+      read_timeout: "600s"
+      exec_timeout: "600s"
+    labels:
+      com.openfaas.scale.min: "1"
+      com.openfaas.scale.max: "3"
+    limits:
+      memory: 1Gi
+    requests:
+      memory: 128Mi
+
+  # ── Object Detector: YOLOv4 on extracted frames ─────────────────────
+  object-detector:
+    skip_build: true
+    image: soumyadeeps/object-detector:latest
+    environment:
+      write_timeout: "600s"
+      read_timeout: "600s"
+      exec_timeout: "600s"
+    labels:
+      com.openfaas.scale.min: "1"
+      com.openfaas.scale.max: "3"
+    limits:
+      memory: 1Gi
+    requests:
+      memory: 128Mi
