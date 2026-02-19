@@ -41,3 +41,7 @@ nohup.out
 
 # === Docker ===
 *.tar
+
+# === Extra Files ===
+out.tar.gz
+*.mp4
