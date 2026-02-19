@@ -40,6 +40,13 @@ This project deploys the **VideoSearcher** AI-SPRINT video processing pipeline a
   - [6. aisprint Import Errors](#6-aisprint-import-errors)
 - [Function Details](#function-details)
 - [Configuration Reference](#configuration-reference)
+- [Performance Testing (JMeter)](#performance-testing-jmeter)
+  - [Test Plan Overview](#test-plan-overview)
+  - [Load Configuration](#load-configuration)
+  - [Installing JMeter](#installing-jmeter)
+  - [Running the Tests](#running-the-tests)
+  - [Analyzing Results](#analyzing-results)
+  - [Test Files Reference](#test-files-reference)
 - [Future Improvements](#future-improvements)
 
 ---
@@ -660,6 +667,183 @@ RUN pip install --no-cache-dir /tmp/aisprint-stub && rm -rf /tmp/aisprint-stub
 | librosa-fn | 128Mi | 1Gi |
 | deepspeech-fn | 128Mi | 1Gi |
 | object-detector | 128Mi | 1Gi |
+
+---
+
+## Performance Testing (JMeter)
+
+Performance tests are executed using **Apache JMeter** to measure response times, throughput, and error rates of the deployed OpenFaaS functions under different load levels.
+
+### Test Plan Overview
+
+The test plan (`jmeter-tests/videosearcher-load-test.jmx`) simulates realistic user behavior:
+
+1. A virtual user sends a POST request to a function endpoint
+2. Receives and reads the response
+3. **Waits 20 seconds** (think time) — simulating a real user reading the response
+4. Sends the next request to the next function in the pipeline
+5. Repeats for the configured test duration
+
+Each virtual user calls all **7 functions in pipeline order**:
+
+```
+ffmpeg-0 → librosa-fn → ffmpeg-1 → ffmpeg-2 → ffmpeg-3 → deepspeech-fn → object-detector
+```
+
+### Load Configuration
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| **Concurrent Users** | 5, 10, 15 | Three progressive load levels |
+| **Think Time** | 20 seconds | Pause between each request (simulates user reading response) |
+| **Ramp-up Period** | 10 seconds | Time to start all threads |
+| **Test Duration** | 300 seconds (5 min) | Per load level |
+| **Protocol** | HTTP POST | JSON body with input/output paths |
+
+The testing strategy follows the principle of **starting with a low number of users** (5) and progressively increasing (10, then 15) to observe how the system behaves under increasing load.
+
+### Installing JMeter
+
+```bash
+# macOS
+brew install jmeter
+
+# Verify installation
+jmeter --version
+```
+
+### Running the Tests
+
+**Option 1: Use the automated runner script** (recommended)
+
+```bash
+cd jmeter-tests
+
+# Run all 3 load levels (5 → 10 → 15 users)
+./run-tests.sh
+
+# Run a specific load level only
+./run-tests.sh 5          # 5 users only
+./run-tests.sh 5 10       # 5 and 10 users
+```
+
+The script will:
+- Check prerequisites (JMeter installed, gateway reachable)
+- Run each load level for 5 minutes
+- Wait 30 seconds between levels for system stabilization
+- Generate HTML reports and print a quick summary
+
+**Option 2: Run JMeter directly**
+
+```bash
+# CLI mode (non-GUI) — 5 users, 20s think time, 5 min duration
+jmeter -n \
+    -t jmeter-tests/videosearcher-load-test.jmx \
+    -l jmeter-tests/results/5-users/results.jtl \
+    -Jusers=5 \
+    -Jthinktime=20000 \
+    -Jduration=300 \
+    -e -o jmeter-tests/results/5-users/report
+
+# 10 users
+jmeter -n \
+    -t jmeter-tests/videosearcher-load-test.jmx \
+    -l jmeter-tests/results/10-users/results.jtl \
+    -Jusers=10 \
+    -Jthinktime=20000 \
+    -Jduration=300 \
+    -e -o jmeter-tests/results/10-users/report
+
+# 15 users
+jmeter -n \
+    -t jmeter-tests/videosearcher-load-test.jmx \
+    -l jmeter-tests/results/15-users/results.jtl \
+    -Jusers=15 \
+    -Jthinktime=20000 \
+    -Jduration=300 \
+    -e -o jmeter-tests/results/15-users/report
+```
+
+**Option 3: Open in JMeter GUI** (for debugging/visualization)
+
+```bash
+jmeter -t jmeter-tests/videosearcher-load-test.jmx
+```
+
+In the GUI you can:
+- View and modify the test plan
+- Enable "View Results Tree" listener for debugging
+- Run tests and see real-time graphs
+
+### Analyzing Results
+
+**HTML Reports**: JMeter auto-generates comprehensive HTML reports in each results directory:
+
+```bash
+# Open the HTML report in your browser
+open jmeter-tests/results/5-users/report/index.html
+open jmeter-tests/results/10-users/report/index.html
+open jmeter-tests/results/15-users/report/index.html
+```
+
+The HTML report includes:
+- **Dashboard**: Overall statistics, APDEX score, request summary
+- **Response Times Over Time**: Graph showing response time trends
+- **Throughput**: Requests per second over time
+- **Response Time Percentiles**: P50, P90, P95, P99
+- **Error %**: Failure rate per endpoint
+
+**Compare across load levels**: Use the comparison script to see all levels side-by-side:
+
+```bash
+cd jmeter-tests
+./compare-results.sh
+```
+
+This prints a table like:
+
+```
+│ Test Level   │ Total  │  Pass  │  Fail  │   Avg   │   Min   │   Max   │   P50   │   P90   │   P95    │ Err %  │ Throughput │
+├──────────────┼────────┼────────┼────────┼─────────┼─────────┼─────────┼─────────┼─────────┼──────────┼────────┼────────────┤
+│ 5-users      │    105 │    105 │      0 │  1234ms │   45ms  │  5678ms │  890ms  │ 3456ms  │  4567ms  │   0.0% │    0.35/s  │
+│ 10-users     │    210 │    208 │      2 │  2345ms │   56ms  │  8901ms │ 1234ms  │ 5678ms  │  7890ms  │   0.9% │    0.70/s  │
+│ 15-users     │    315 │    310 │      5 │  3456ms │   67ms  │ 12345ms │ 2345ms  │ 8901ms  │ 10234ms  │   1.6% │    1.05/s  │
+```
+
+Plus a per-function breakdown showing which endpoints are slowest.
+
+### Test Files Reference
+
+```
+jmeter-tests/
+├── videosearcher-load-test.jmx   # JMeter test plan (open in JMeter GUI or run via CLI)
+├── run-tests.sh                  # Automated runner: runs tests at 5, 10, 15 users
+├── compare-results.sh            # Compares results across load levels
+└── results/                      # Test output (generated, gitignored)
+    ├── 5-users/
+    │   ├── results_<timestamp>.jtl    # Raw results (CSV)
+    │   ├── jmeter_<timestamp>.log     # JMeter log
+    │   └── report_<timestamp>/        # HTML report
+    │       └── index.html
+    ├── 10-users/
+    │   └── ...
+    └── 15-users/
+        └── ...
+```
+
+### Configurable Parameters
+
+All parameters can be overridden via JMeter properties (`-J` flags):
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `users` | 5 | Number of concurrent virtual users |
+| `thinktime` | 20000 | Think time in milliseconds |
+| `rampup` | 10 | Ramp-up period in seconds |
+| `duration` | 300 | Test duration in seconds |
+| `host` | 127.0.0.1 | OpenFaaS gateway host |
+| `port` | 8080 | OpenFaaS gateway port |
+| `loops` | -1 | Loop count (-1 = infinite, controlled by duration) |
 
 ---
 

@@ -42,6 +42,10 @@ nohup.out
 # === Docker ===
 *.tar
 
+# === JMeter test results (generated) ===
+jmeter-tests/results/
+*.jtl
+
 # === Extra Files ===
 out.tar.gz
 *.mp4
