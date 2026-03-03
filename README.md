@@ -1,6 +1,6 @@
 # VideoSearcher on OpenFaaS
 
-This project deploys the **VideoSearcher** AI-SPRINT video processing pipeline as a set of serverless functions on **OpenFaaS**, running on a local Kubernetes cluster (Docker Desktop). The key design goal was to **keep all original `main.py` files completely untouched** — no code changes to any component.
+This project deploys the **VideoSearcher** AI-SPRINT video processing pipeline as a set of serverless functions on **OpenFaaS**, running on both a **local Kubernetes cluster (Docker Desktop)** and a **cloud environment (AWS EKS)**. The key design goal was to **keep all original `main.py` files completely untouched** — no code changes to any component.
 
 ---
 
@@ -47,6 +47,18 @@ This project deploys the **VideoSearcher** AI-SPRINT video processing pipeline a
   - [Running the Tests](#running-the-tests)
   - [Analyzing Results](#analyzing-results)
   - [Test Files Reference](#test-files-reference)
+- [Cloud Deployment (AWS EKS)](#cloud-deployment-aws-eks)
+  - [Why AWS EKS?](#why-aws-eks)
+  - [Cloud Environment Comparison](#cloud-environment-comparison)
+  - [AWS Prerequisites](#aws-prerequisites)
+  - [Step 1: Create the EKS Cluster](#step-1-create-the-eks-cluster)
+  - [Step 2: Install OpenFaaS on EKS](#step-2-install-openfaas-on-eks)
+  - [Step 3: Rebuild Images for amd64](#step-3-rebuild-images-for-amd64)
+  - [Step 4: Push Images and Deploy](#step-4-push-images-and-deploy)
+  - [Step 5: Expose the Gateway Publicly](#step-5-expose-the-gateway-publicly)
+  - [Cloud Deployment Verification](#cloud-deployment-verification)
+  - [Issues Faced During Cloud Deployment](#issues-faced-during-cloud-deployment)
+  - [Cost Estimate](#cost-estimate)
 - [Future Improvements](#future-improvements)
 
 ---
@@ -847,12 +859,419 @@ All parameters can be overridden via JMeter properties (`-J` flags):
 
 ---
 
+## Cloud Deployment (AWS EKS)
+
+After validating the pipeline locally on Docker Desktop, we deployed the entire OpenFaaS stack to **Amazon Elastic Kubernetes Service (EKS)** for production-grade cloud hosting.
+
+### Why AWS EKS?
+
+We evaluated multiple cloud Kubernetes services. AWS EKS was selected for the following reasons:
+
+1. **Elastic File System (EFS)**: Provides `ReadWriteMany` persistent volumes natively — critical for a pipeline where all 7 functions need to share input/output data on the same filesystem
+2. **Elastic Container Registry (ECR)**: Integrated private container registry for faster in-region image pulls (not used in our initial deployment since OpenFaaS CE requires public images, but available for future migration to OpenFaaS Pro)
+3. **Full amd64 node control**: DeepSpeech requires x86_64 — EKS makes it straightforward to select specific instance types
+4. **Mature Kubernetes ecosystem**: First-class support for Helm, `eksctl`, and the OpenFaaS `faas-netes` provider
+5. **Elastic Load Balancer (ELB)**: One-command setup to expose the OpenFaaS gateway publicly via `kubectl patch svc gateway -p '{"spec":{"type":"LoadBalancer"}}'`
+
+### Cloud Environment Comparison
+
+Before choosing AWS EKS, we evaluated the following cloud Kubernetes platforms:
+
+| Factor | **AWS EKS** (chosen) | Azure AKS | Google GKE |
+|--------|---------------------|-----------|------------|
+| Kubernetes maturity | Excellent | Good | Excellent |
+| AMD64 node availability | Full control via instance types | Full control | Full control |
+| Container registry | ECR (private, integrated) | ACR | GCR / Artifact Registry |
+| Shared storage (ReadWriteMany) | **EFS** (native, easy) | Azure Files | Filestore |
+| Load balancer integration | ELB (automatic) | Azure LB | Cloud LB |
+| CLI tooling | `eksctl` (purpose-built) | `az aks` | `gcloud` |
+| Free tier / credits | 12-month free tier | $200 credit | $300 credit |
+| Estimated monthly cost | ~$100–215 | ~$80–150 | ~$70–140 |
+
+**Decision**: AWS EKS was chosen for its superior shared storage (EFS), seamless load balancer provisioning, and the `eksctl` CLI which simplifies cluster lifecycle management.
+
+### AWS Prerequisites
+
+| Tool | Version Used | Purpose |
+|------|-------------|----------|
+| AWS CLI | v2 | Interact with AWS services |
+| eksctl | 0.223.0 | Create and manage EKS clusters |
+| kubectl | v1.34.1 | Manage Kubernetes resources |
+| Helm | v3 | Install OpenFaaS via Helm chart |
+| faas-cli | 0.18.0 | Deploy functions to OpenFaaS |
+| Docker | 29.1.3 | Build container images |
+
+**Install prerequisites** (macOS):
+
+```bash
+brew install awscli eksctl kubectl helm
+curl -sL https://cli.openfaas.com | sudo sh
+```
+
+**Configure AWS credentials**:
+
+```bash
+aws configure
+# AWS Access Key ID: <your-access-key>
+# AWS Secret Access Key: <your-secret-key>
+# Default region name: us-east-1
+# Default output format: json
+```
+
+### Step 1: Create the EKS Cluster
+
+#### Check vCPU Quota
+
+Before creating the cluster, verify your On-Demand vCPU quota in the target region:
+
+```bash
+aws service-quotas get-service-quota \
+  --service-code ec2 \
+  --quota-code L-1216C47A \
+  --region us-east-1
+```
+
+The default quota for new AWS accounts is often **5 vCPUs**. This limits your instance type choices.
+
+#### Instance Type Selection
+
+| Instance Type | vCPUs | Memory | vCPUs for 2 Nodes | Fits 5 vCPU Quota? | Notes |
+|---------------|-------|--------|-------------------|--------------------|-------|
+| `t3.xlarge` | 4 | 16 GB | 8 | No | Ideal but exceeds quota |
+| `t3.large` | 2 | 8 GB | 4 | Yes | Good balance |
+| `t3.medium` | 2 | 4 GB | 4 | Yes | Tight on memory |
+| `m7i-flex.large` | 2 | 8 GB | 4 | **Yes** | **Chosen** — Free Tier eligible, 8GB RAM |
+
+We selected **`m7i-flex.large`** because:
+- 2 vCPUs × 2 nodes = 4 vCPUs → fits within the 5 vCPU quota
+- 8 GB RAM per node → sufficient for memory-intensive functions (deepspeech, object-detector, librosa each need up to 1Gi)
+- Free Tier eligible — reducing cost during development
+
+#### Create the Cluster
+
+```bash
+eksctl create cluster \
+  --name videosearcher \
+  --region us-east-1 \
+  --node-type m7i-flex.large \
+  --nodes 2 \
+  --nodes-min 1 \
+  --nodes-max 2 \
+  --managed \
+  --zones us-east-1a,us-east-1b
+```
+
+This takes approximately **15–20 minutes**. `eksctl` creates:
+- A VPC with public and private subnets in two availability zones
+- The EKS control plane
+- A managed node group with 2 EC2 instances
+- All necessary IAM roles and security groups
+
+Verify the cluster is ready:
+
+```bash
+kubectl get nodes
+# NAME                             STATUS   ROLES    AGE   VERSION
+# ip-192-168-31-209.ec2.internal   Ready    <none>   9m    v1.34.4-eks-efcacff
+# ip-192-168-47-216.ec2.internal   Ready    <none>   9m    v1.34.4-eks-efcacff
+```
+
+### Step 2: Install OpenFaaS on EKS
+
+```bash
+# Create OpenFaaS namespaces
+kubectl apply -f https://raw.githubusercontent.com/openfaas/faas-netes/master/namespaces.yml
+
+# Add Helm repo
+helm repo add openfaas https://openfaas.github.io/faas-netes/
+helm repo update
+
+# Install OpenFaaS
+helm upgrade openfaas --install openfaas/openfaas \
+  --namespace openfaas \
+  --set functionNamespace=openfaas-fn \
+  --set generateBasicAuth=true
+
+# Verify all OpenFaaS pods are running
+kubectl get pods -n openfaas
+# NAME                            READY   STATUS    RESTARTS   AGE
+# alertmanager-...                1/1     Running   0          5m
+# gateway-...                     2/2     Running   0          5m
+# nats-...                        1/1     Running   0          5m
+# prometheus-...                  1/1     Running   0          5m
+# queue-worker-...                1/1     Running   0          5m
+
+# Get the admin password
+PASSWORD=$(kubectl get secret -n openfaas basic-auth \
+  -o jsonpath="{.data.basic-auth-password}" | base64 --decode)
+echo $PASSWORD
+
+# Port-forward the gateway and login
+kubectl port-forward -n openfaas svc/gateway 8080:8080 &
+echo -n $PASSWORD | faas-cli login --username admin --password-stdin
+```
+
+### Step 3: Rebuild Images for amd64
+
+**Critical**: If you are building on Apple Silicon (ARM64/M1/M2/M3), the default `docker build` produces ARM64 images. The EKS nodes are x86_64 (amd64), so ARM64 images will crash with:
+
+```
+exec /usr/bin/fwatchdog: exec format error
+```
+
+**All images must be built with `--platform linux/amd64`.**
+
+The `build.sh` script has been updated to force amd64 builds for all functions:
+
+```bash
+#!/bin/bash
+set -e
+cd "$(dirname "$0")"
+
+# Force amd64 builds — required for x86_64 EKS nodes when building on Apple Silicon
+PLATFORM="--platform linux/amd64"
+
+docker build $PLATFORM -f ffmpeg-0/Dockerfile -t videosearcher/ffmpeg-0:latest .
+docker build $PLATFORM -f ffmpeg-1/Dockerfile -t videosearcher/ffmpeg-1:latest .
+docker build $PLATFORM -f ffmpeg-2/Dockerfile -t videosearcher/ffmpeg-2:latest .
+docker build $PLATFORM -f ffmpeg-3/Dockerfile -t videosearcher/ffmpeg-3:latest .
+docker build $PLATFORM -f librosa/Dockerfile -t videosearcher/librosa-fn:latest .
+docker build $PLATFORM -f deepspeech/Dockerfile -t videosearcher/deepspeech-fn:latest .
+docker build $PLATFORM -f object-detector/Dockerfile -t videosearcher/object-detector:latest .
+```
+
+Run the build:
+
+```bash
+chmod +x build.sh
+./build.sh
+```
+
+Verify the architecture of a built image:
+
+```bash
+docker inspect --format='{{.Architecture}}' videosearcher/ffmpeg-0:latest
+# amd64
+```
+
+### Step 4: Push Images and Deploy
+
+**Tag and push all images to Docker Hub**:
+
+```bash
+docker login
+
+# Push each image individually
+docker tag videosearcher/ffmpeg-0 soumyadeeps/ffmpeg-0 && docker push soumyadeeps/ffmpeg-0
+docker tag videosearcher/ffmpeg-1 soumyadeeps/ffmpeg-1 && docker push soumyadeeps/ffmpeg-1
+docker tag videosearcher/ffmpeg-2 soumyadeeps/ffmpeg-2 && docker push soumyadeeps/ffmpeg-2
+docker tag videosearcher/ffmpeg-3 soumyadeeps/ffmpeg-3 && docker push soumyadeeps/ffmpeg-3
+docker tag videosearcher/librosa-fn soumyadeeps/librosa-fn && docker push soumyadeeps/librosa-fn
+docker tag videosearcher/deepspeech-fn soumyadeeps/deepspeech-fn && docker push soumyadeeps/deepspeech-fn
+docker tag videosearcher/object-detector soumyadeeps/object-detector && docker push soumyadeeps/object-detector
+```
+
+**Deploy to OpenFaaS on EKS**:
+
+```bash
+# Ensure port-forward is active
+kubectl port-forward -n openfaas svc/gateway 8080:8080 &
+
+# Deploy all functions
+faas-cli deploy -f stack.yml
+```
+
+Verify all pods are running:
+
+```bash
+kubectl get pods -n openfaas-fn
+# NAME                               READY   STATUS    RESTARTS   AGE
+# deepspeech-fn-...                  1/1     Running   0          73s
+# ffmpeg-0-...                       1/1     Running   0          73s
+# ffmpeg-1-...                       1/1     Running   0          73s
+# ffmpeg-2-...                       1/1     Running   0          73s
+# ffmpeg-3-...                       1/1     Running   0          73s
+# librosa-fn-...                     1/1     Running   0          73s
+# object-detector-...                1/1     Running   0          72s
+```
+
+### Step 5: Expose the Gateway Publicly
+
+To make the OpenFaaS gateway accessible over the internet, change the gateway service type to `LoadBalancer`:
+
+```bash
+kubectl patch svc gateway -n openfaas -p '{"spec":{"type":"LoadBalancer"}}'
+```
+
+AWS automatically provisions an Elastic Load Balancer (ELB). Wait 1–2 minutes, then get the URL:
+
+```bash
+kubectl get svc gateway -n openfaas
+# NAME      TYPE           CLUSTER-IP      EXTERNAL-IP                                                               PORT(S)          AGE
+# gateway   LoadBalancer   10.100.122.36   a86db78a1498941edbb5952f01041129-854708034.us-east-1.elb.amazonaws.com     8080:31083/TCP   33m
+```
+
+The gateway is now accessible at:
+
+```
+http://<ELB-URL>:8080
+```
+
+Invoke functions from anywhere:
+
+```bash
+curl http://<ELB-URL>:8080/function/ffmpeg-0 \
+  -d '{"input":"/tmp/test.mp4","output":"/tmp/out"}'
+
+faas-cli list --gateway http://<ELB-URL>:8080
+```
+
+> **Security note**: The ELB endpoint is publicly accessible. The basic-auth credentials protect the OpenFaaS API, but for production you should:
+> - Add HTTPS via an AWS ACM certificate + ALB Ingress Controller
+> - Restrict access via security groups to known IP ranges
+> - Consider using OpenFaaS Pro with IAM-based authentication
+
+### Cloud Deployment Verification
+
+Final state of the cloud deployment:
+
+| Component | Details |
+|-----------|---------|
+| **EKS Cluster** | `videosearcher` — ACTIVE, us-east-1 |
+| **Kubernetes Version** | v1.34 |
+| **Node Group** | 2× `m7i-flex.large` (2 vCPU, 8GB RAM each) |
+| **Total Cluster Resources** | 4 vCPUs, 16 GB RAM |
+| **OpenFaaS** | CE (Community Edition) via Helm |
+| **Gateway** | Exposed via AWS ELB on port 8080 |
+| **Functions** | All 7 Running (1/1), 0 restarts |
+| **Image Registry** | Docker Hub (public, `soumyadeeps/*`) |
+
+```bash
+faas-cli list
+# Function                        Invocations     Replicas
+# deepspeech-fn                   0               1
+# ffmpeg-0                        0               1
+# ffmpeg-1                        0               1
+# ffmpeg-2                        0               1
+# ffmpeg-3                        0               1
+# librosa-fn                      0               1
+# object-detector                 0               1
+```
+
+### Issues Faced During Cloud Deployment
+
+#### 1. CloudFormation Stack Timeout (Node Group Creation)
+
+**Problem**: `eksctl create cluster` with `t3.xlarge` nodes failed with `exceeded max wait time for StackCreateComplete waiter`.
+
+**Root Cause**: The AWS account had a **5 vCPU On-Demand quota** (default for new accounts). `t3.xlarge` (4 vCPUs) × 2 nodes = 8 vCPUs, exceeding the quota. CloudFormation couldn't launch the EC2 instances, causing the stack to time out.
+
+**Diagnosis**:
+```bash
+aws service-quotas get-service-quota \
+  --service-code ec2 \
+  --quota-code L-1216C47A \
+  --region us-east-1
+# "Value": 5.0  ← only 5 vCPUs allowed
+```
+
+**Fix**: Switched to `m7i-flex.large` (2 vCPUs × 2 nodes = 4 vCPUs), which fits within the 5 vCPU quota and provides 8GB RAM per node (more than `t3.medium` at 4GB).
+
+#### 2. CloudFormation Stack Already Exists
+
+**Problem**: After a failed cluster creation, retrying `eksctl create cluster` returned `AlreadyExistsException: Stack [eksctl-videosearcher-cluster] already exists`.
+
+**Root Cause**: The failed attempt left orphaned CloudFormation stacks that weren't fully cleaned up by `eksctl delete cluster`.
+
+**Fix**: Manually deleted the CloudFormation stacks:
+```bash
+# Check for lingering stacks
+aws cloudformation list-stacks --region us-east-1 \
+  --query "StackSummaries[?contains(StackName,'videosearcher') && StackStatus!='DELETE_COMPLETE'].{Name:StackName,Status:StackStatus}" \
+  --output table
+
+# Delete them manually
+aws cloudformation delete-stack --stack-name eksctl-videosearcher-nodegroup-ng-XXXX --region us-east-1
+aws cloudformation delete-stack --stack-name eksctl-videosearcher-cluster --region us-east-1
+aws cloudformation wait stack-delete-complete --stack-name eksctl-videosearcher-cluster --region us-east-1
+```
+
+#### 3. exec format error (ARM64 vs amd64 Images)
+
+**Problem**: After deploying to EKS, 6 out of 7 function pods crashed with `CrashLoopBackOff`. Logs showed:
+
+```
+exec /usr/bin/fwatchdog: exec format error
+```
+
+Only `deepspeech-fn` worked correctly.
+
+**Root Cause**: The Docker images were built on **Apple Silicon (ARM64)** without specifying `--platform linux/amd64`. The EKS nodes run **x86_64 (amd64)**, so the ARM64 binaries (including the `fwatchdog` watchdog) couldn't execute. DeepSpeech was the only function that worked because its Dockerfile already had `--platform linux/amd64` (required for the DeepSpeech Python wheel).
+
+**Fix**: Updated `build.sh` to add `--platform linux/amd64` to **all** Docker build commands, rebuilt all images, re-pushed to Docker Hub, and deleted the old pods to force new image pulls:
+
+```bash
+# Rebuild all images for amd64
+./build.sh
+
+# Re-tag and push
+docker tag videosearcher/ffmpeg-0 soumyadeeps/ffmpeg-0 && docker push soumyadeeps/ffmpeg-0
+# ... (repeat for all 7 functions)
+
+# Force new pods with fresh image pulls
+kubectl delete pods --all -n openfaas-fn
+```
+
+#### 4. Kubernetes Image Cache (Stale ARM64 Images)
+
+**Problem**: Even after pushing new amd64 images, pods still crashed with `exec format error` because Kubernetes was using **cached ARM64 images** on the nodes.
+
+**Root Cause**: The Docker Hub tag (`:latest`) was the same, but the local `docker tag` command hadn't been re-run after the rebuild. The pushed image on Docker Hub was still the old ARM64 version.
+
+**Diagnosis**:
+```bash
+# Compare image IDs — they should match
+docker inspect --format='{{.Id}}' videosearcher/ffmpeg-0:latest
+# sha256:fe3a5b5e57ca...  (new amd64 build)
+docker inspect --format='{{.Id}}' soumyadeeps/ffmpeg-0:latest
+# sha256:33c5e4ba15fa...  (old ARM64 — different!)
+```
+
+**Fix**: Re-ran `docker tag` to update the Docker Hub tag to point to the new amd64 image, then pushed again. After deleting all pods (`kubectl delete pods --all -n openfaas-fn`), Kubernetes pulled the correct amd64 images and all 7 pods started successfully.
+
+### Cost Estimate
+
+Estimated monthly cost for the deployment as configured:
+
+| Resource | Specification | Monthly Cost |
+|----------|--------------|-------------|
+| EKS control plane | 1 cluster | ~$73 |
+| EC2 nodes | 2× `m7i-flex.large` (Free Tier eligible) | ~$0–60* |
+| Elastic Load Balancer | 1 Classic LB | ~$18 |
+| Data transfer | Moderate | ~$5–10 |
+| Docker Hub | Public images (free) | $0 |
+| **Total** | | **~$96–161/mo** |
+
+\* Free Tier eligible instances are free for 750 hours/month in the first 12 months.
+
+**Cost-saving tips**:
+- Use **Spot Instances** for worker nodes (60–70% savings on EC2)
+- Scale down to 1 node when idle
+- Use `eksctl scale nodegroup` to adjust capacity on demand
+- Set up cluster auto-scaler to scale to 0 nodes during inactivity
+- Consider **GKE Autopilot** for pay-per-pod pricing (~$70–100/mo)
+
+---
+
 ## Future Improvements
 
-1. **Shared Volume**: Set up a PersistentVolumeClaim to allow all functions to share input/output data without `kubectl cp`
+1. **Shared Volume (EFS)**: Set up an Amazon EFS `PersistentVolumeClaim` with `ReadWriteMany` access so all functions can share input/output data without `kubectl cp`
 2. **Pipeline Orchestrator**: Build a controller function that chains the 7 stages together automatically
 3. **ARM64 DeepSpeech Alternative**: Replace DeepSpeech with a speech-to-text model that has native ARM64 support (e.g., Whisper)
-4. **Private Registry**: Use a private container registry instead of public Docker Hub for production
-5. **Model Download at Runtime**: Instead of bundling large model files (~1.1GB for DeepSpeech) in the Docker image, download them at container startup from object storage
-6. **Increase Cluster Resources**: For production workloads, use a multi-node cluster with more memory to handle concurrent video processing
-7. **Health Checks**: Add more sophisticated health checks beyond the default lock file
+4. **Private Registry (ECR)**: Migrate from public Docker Hub to Amazon ECR for faster in-region pulls and private image storage (requires OpenFaaS Pro)
+5. **Model Download at Runtime**: Instead of bundling large model files (~1.1GB for DeepSpeech) in the Docker image, download them at container startup from S3
+6. **HTTPS / TLS**: Add an AWS ACM certificate and ALB Ingress Controller to serve the OpenFaaS gateway over HTTPS
+7. **Security Hardening**: Restrict ELB access via security groups, enable Kubernetes RBAC, and rotate the OpenFaaS admin password
+8. **vCPU Quota Increase**: Request a quota increase to 16+ vCPUs to use larger instance types (e.g., `t3.xlarge` with 16GB RAM) for better performance
+9. **Health Checks**: Add more sophisticated health checks beyond the default lock file
+10. **CI/CD Pipeline**: Automate the build → push → deploy cycle using GitHub Actions or AWS CodePipeline
