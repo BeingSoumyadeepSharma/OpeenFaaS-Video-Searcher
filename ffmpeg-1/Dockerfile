@@ -17,6 +17,12 @@ WORKDIR /home/app/function
 COPY aisprint-stub /tmp/aisprint-stub
 RUN pip install --no-cache-dir /tmp/aisprint-stub && rm -rf /tmp/aisprint-stub
 
+# Install boto3 for S3 support (used by s3_helper.py in entry.sh)
+RUN pip install --no-cache-dir boto3
+
+# Copy S3 helper script (transparent S3 download/upload wrapper)
+COPY s3-wrapper/s3_helper.py .
+
 # Copy original code — UNTOUCHED
 COPY ffmpeg-1/main.py .
 COPY ffmpeg-1/entry.sh .

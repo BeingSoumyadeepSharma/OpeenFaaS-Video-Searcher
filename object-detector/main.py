@@ -56,6 +56,9 @@ def main(args):
     # post_processing
     image = post_processing(return_dict["image_source"], detections)
     
+    output_dir = os.path.dirname(args['output'])
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
     cv2.imwrite(args['output'] + ".jpg", image)
 
 

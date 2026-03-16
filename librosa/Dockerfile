@@ -17,9 +17,15 @@ WORKDIR /home/app/function
 COPY aisprint-stub /tmp/aisprint-stub
 RUN pip install --no-cache-dir /tmp/aisprint-stub && rm -rf /tmp/aisprint-stub
 
+# Install boto3 for S3 support (used by s3_helper.py in entry.sh)
+RUN pip install --no-cache-dir boto3
+
 # Install Python dependencies (from requirements.txt)
 COPY librosa/requirements.txt .
 RUN pip install --no-cache-dir SoundFile==0.12.1 librosa==0.10.0
+
+# Copy S3 helper script (transparent S3 download/upload wrapper)
+COPY s3-wrapper/s3_helper.py .
 
 # Copy original code — UNTOUCHED
 COPY librosa/main.py .

@@ -20,6 +20,7 @@ def main(args):
     print("SCRIPT: Input at '{}', saving output in '{}'".format(args['input'], args['output']))
 
     output_dir = os.path.dirname(orig_output)
+    os.makedirs(output_dir, exist_ok=True)
     output_name = os.path.basename(orig_output)
 
     temp_audio_path = orig_input.replace(".mp4", ".wav")

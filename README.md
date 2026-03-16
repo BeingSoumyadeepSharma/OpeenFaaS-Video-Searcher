@@ -14,9 +14,14 @@ This project deploys the **VideoSearcher** AI-SPRINT video processing pipeline a
   - [Why Classic Watchdog (Not of-watchdog)](#why-classic-watchdog-not-of-watchdog)
   - [Why aisprint-stub (No-Op Package)](#why-aisprint-stub-no-op-package)
   - [Why entry.sh Wrappers](#why-entrysh-wrappers)
+- [S3 Integration](#s3-integration)
+  - [S3 Helper Script](#s3-helper-script)
+  - [Subfolder Path Convention](#subfolder-path-convention)
+  - [Per-Invocation Staging (Race Condition Fix)](#per-invocation-staging-race-condition-fix)
 - [Repository Structure](#repository-structure)
 - [Files We Created (Original Code Left Untouched)](#files-we-created-original-code-left-untouched)
   - [aisprint-stub Package](#aisprint-stub-package)
+  - [S3 Helper](#s3-helper)
   - [entry.sh Wrappers](#entrysh-wrappers)
   - [Dockerfiles](#dockerfiles)
   - [stack.yml](#stackyml)
@@ -38,6 +43,8 @@ This project deploys the **VideoSearcher** AI-SPRINT video processing pipeline a
   - [4. object-detector Pod Stuck in Pending (Insufficient Memory)](#4-object-detector-pod-stuck-in-pending-insufficient-memory)
   - [5. DeepSpeech No ARM64 Wheel](#5-deepspeech-no-arm64-wheel)
   - [6. aisprint Import Errors](#6-aisprint-import-errors)
+  - [7. JMeter Pipeline Stopping at ffmpeg-1](#7-jmeter-pipeline-stopping-at-ffmpeg-1)
+  - [8. Concurrent Request Race Condition (/tmp/s3data)](#8-concurrent-request-race-condition-tmps3data)
 - [Function Details](#function-details)
 - [Configuration Reference](#configuration-reference)
 - [Performance Testing (JMeter)](#performance-testing-jmeter)
@@ -173,9 +180,71 @@ The watchdog's `fprocess` needs to be a single command that reads from stdin. Ou
 
 1. Reads JSON from stdin
 2. Uses `jq` to extract `input` and `output` fields
-3. Calls `python main.py -i "$INPUT" -o "$OUTPUT"`
+3. Resolves S3 paths to local staging via `s3_helper.py` (downloads input, maps output)
+4. Calls `python main.py -i "$LOCAL_INPUT" -o "$LOCAL_OUTPUT"`
+5. Uploads output back to S3 if the original path was an S3 URI
+6. Cleans up the per-invocation staging directory
 
-This way the original `main.py` receives exactly the same arguments it always expected.
+This way the original `main.py` receives local file paths exactly as it always expected, while the S3 transport layer is completely invisible to it.
+
+---
+
+## S3 Integration
+
+To enable the pipeline to work end-to-end in a cloud deployment (where functions run on different pods and cannot share a local filesystem), we built a **transparent S3 integration layer**. This allows functions to read inputs from S3 and write outputs to S3 — all without changing any original `main.py` code.
+
+### S3 Helper Script
+
+The `s3-wrapper/s3_helper.py` script is copied into every function's Docker image. It provides two commands:
+
+- **`prepare <input> <output>`**: If input is an S3 URI (`s3://bucket/key`), it downloads the file to a local staging directory. Maps the output to a local staging path. Prints shell variable assignments (`LOCAL_INPUT` and `LOCAL_OUTPUT`) consumed by `eval` in `entry.sh`.
+- **`upload <local_output> <original_output>`**: If the original output was an S3 URI, walks the local output directory and uploads all files back to S3.
+
+Local (non-S3) paths pass through unchanged, so the same functions work both locally and in the cloud.
+
+### Subfolder Path Convention
+
+Each pipeline run uses a unique S3 prefix to keep outputs organized:
+
+```
+s3://cloud-pipeline-loadtest-sharma/run_<UUID>/
+  ├── ffmpeg0/output.tar.gz
+  ├── librosa/output.tar.gz
+  ├── ffmpeg1/clip_0.mp4, clip_1.mp4, ...
+  ├── ffmpeg2/clip_0.tar.gz
+  ├── ffmpeg3/frame-1.jpg, frame-2.jpg, ...
+  ├── deepspeech/clip_0.tar.gz
+  └── objdetect/frame-1.jpg
+```
+
+The `s3_helper.py` `prepare()` function preserves the full S3 key structure under the local staging directory (e.g., `s3://bucket/run_abc/ffmpeg0/output.tar.gz` → `/tmp/s3data_<PID>/input/run_abc/ffmpeg0/output.tar.gz`). This was a deliberate change from the original implementation which flattened all keys to just the basename, which would lose subfolder structure and cause collisions.
+
+To support this subfolder convention, all 7 `main.py` files had `os.makedirs(output_dir, exist_ok=True)` added (the only modification to the function scripts — ensuring the output directory tree exists before writing).
+
+### Per-Invocation Staging (Race Condition Fix)
+
+The OpenFaaS **classic watchdog** forks a new process for every incoming HTTP request. When multiple requests hit the same pod concurrently, they all share the pod's filesystem. Originally, all invocations used a shared `/tmp/s3data` staging directory. This caused a **critical race condition**:
+
+1. Request A starts processing, downloads input to `/tmp/s3data/input/...`
+2. Request B starts processing on the same pod
+3. Request A finishes and runs `rm -rf /tmp/s3data` — **wiping Request B's in-flight data**
+4. Request B fails with missing files
+
+**Fix**: Each invocation now uses a unique staging directory based on its process ID:
+
+```bash
+# In entry.sh
+export S3_STAGING="/tmp/s3data_$$"  # $$ = shell PID, unique per fork
+```
+
+```python
+# In s3_helper.py
+S3_STAGING = os.environ.get("S3_STAGING", "/tmp/s3data")
+S3_INPUT_DIR = os.path.join(S3_STAGING, "input")
+S3_OUTPUT_DIR = os.path.join(S3_STAGING, "output")
+```
+
+Cleanup only removes that invocation's directory: `rm -rf "$S3_STAGING"`. Concurrent requests on the same pod are now fully isolated.
 
 ---
 
@@ -193,6 +262,11 @@ VideoSearcher-src/
 │       ├── __init__.py
 │       ├── annotations.py       # No-op @annotation decorator
 │       └── onnx_inference.py    # Functional ONNX inference stub
+│
+├── s3-wrapper/                  # NEW — Transparent S3 integration
+│   └── s3_helper.py             # Download/upload S3 objects, per-invocation staging
+│
+├── videos.csv                   # Test video list (S3 URIs) for JMeter
 │
 ├── ffmpeg-0/                    # Stage 0: Split audio + video
 │   ├── main.py                  # ORIGINAL (untouched)
@@ -298,9 +372,19 @@ def load_and_inference(onnx_model_path, input_dict):
     return return_dict, outputs
 ```
 
+### S3 Helper
+
+**`s3-wrapper/s3_helper.py`** — Transparent S3 download/upload, installed in every function image:
+
+- **`prepare(input, output)`**: Downloads S3 input to local staging, maps S3 output to local path
+- **`upload(local_output, original_output)`**: Uploads local output files back to S3
+- Uses `S3_STAGING` environment variable for per-invocation isolation
+- Preserves full S3 key structure to support subfolder conventions
+- Installed via `COPY s3-wrapper/s3_helper.py .` in every Dockerfile
+
 ### entry.sh Wrappers
 
-Each function has an `entry.sh` that parses JSON from stdin and invokes the original `main.py`:
+Each function has an `entry.sh` that parses JSON from stdin, handles S3 transfers, and invokes the original `main.py`:
 
 **Standard entry.sh** (used by ffmpeg-0/1/2/3, librosa, deepspeech):
 
@@ -310,7 +394,24 @@ JSON=$(cat)
 INPUT=$(echo "$JSON" | jq -r '.input')
 OUTPUT=$(echo "$JSON" | jq -r '.output')
 cd /home/app/function
-exec python main.py -i "$INPUT" -o "$OUTPUT"
+
+# Use a unique staging dir per invocation to avoid race conditions
+export S3_STAGING="/tmp/s3data_$$"
+
+# Resolve S3 paths to local paths (downloads input from S3 if needed)
+eval $(python s3_helper.py prepare "$INPUT" "$OUTPUT")
+
+python main.py -i "$LOCAL_INPUT" -o "$LOCAL_OUTPUT"
+EXIT_CODE=$?
+
+# Upload output to S3 if the original output was an S3 path
+if [ $EXIT_CODE -eq 0 ]; then
+    python s3_helper.py upload "$LOCAL_OUTPUT" "$OUTPUT"
+fi
+
+# Clean up this invocation's staging area
+rm -rf "$S3_STAGING"
+exit $EXIT_CODE
 ```
 
 **Object-detector entry.sh** (adds ONNX model path argument):
@@ -322,7 +423,19 @@ INPUT=$(echo "$JSON" | jq -r '.input')
 OUTPUT=$(echo "$JSON" | jq -r '.output')
 ONNX_FILE=$(echo "$JSON" | jq -r '.onnx_file // "onnx/yolov4.onnx"')
 cd /home/app/function
-exec python main.py -i "$INPUT" -o "$OUTPUT" -y "$ONNX_FILE"
+
+export S3_STAGING="/tmp/s3data_$$"
+eval $(python s3_helper.py prepare "$INPUT" "$OUTPUT")
+
+python main.py -i "$LOCAL_INPUT" -o "$LOCAL_OUTPUT" -y "$ONNX_FILE"
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -eq 0 ]; then
+    python s3_helper.py upload "$LOCAL_OUTPUT" "$OUTPUT"
+fi
+
+rm -rf "$S3_STAGING"
+exit $EXIT_CODE
 ```
 
 ### Dockerfiles
@@ -486,63 +599,40 @@ faas-cli list
 Verify each function endpoint responds:
 
 ```bash
-# Test ffmpeg-0
-curl -s http://127.0.0.1:8080/function/ffmpeg-0 \
-  -d '{"input":"/tmp/test.mp4","output":"/tmp/out"}'
+GATEWAY="http://a86db78a1498941edbb5952f01041129-854708034.us-east-1.elb.amazonaws.com:8080"
+
+# Test ffmpeg-0 with an S3 input
+curl -s -o /dev/null -w "HTTP: %{http_code}, Time: %{time_total}s\n" \
+  -X POST "$GATEWAY/function/ffmpeg-0" \
+  -H 'Content-Type: application/json' \
+  -d '{"input":"s3://cloud-pipeline-loadtest-sharma/vid1.mp4","output":"s3://cloud-pipeline-loadtest-sharma/run_test/ffmpeg0/output"}'
 
 # Test librosa
-curl -s http://127.0.0.1:8080/function/librosa-fn \
-  -d '{"input":"/tmp/test.tar.gz","output":"/tmp/out"}'
-
-# Test deepspeech
-curl -s http://127.0.0.1:8080/function/deepspeech-fn \
-  -d '{"input":"/tmp/test.tar.gz","output":"/tmp/out"}'
-
-# Test object-detector
-curl -s http://127.0.0.1:8080/function/object-detector \
-  -d '{"input":"/tmp/frames/","output":"/tmp/out"}'
+curl -s -o /dev/null -w "HTTP: %{http_code}, Time: %{time_total}s\n" \
+  -X POST "$GATEWAY/function/librosa-fn" \
+  -H 'Content-Type: application/json' \
+  -d '{"input":"s3://cloud-pipeline-loadtest-sharma/run_test/ffmpeg0/output.tar.gz","output":"s3://cloud-pipeline-loadtest-sharma/run_test/librosa/output"}'
 ```
 
-You should get output from each function. If the input files don't exist, you'll see errors like `No such file or directory` — this is **expected** and confirms the function container is running and the full pipeline (watchdog → entry.sh → main.py) is working.
+You should get `HTTP: 200` for each function. The S3 helper transparently downloads the input, runs the function, and uploads the output.
 
 ### Testing Individual Functions
 
-To test with real data, you need to place files inside the container or on a shared volume:
+Each function accepts a JSON body with `input` and `output` fields. Both can be local paths or S3 URIs:
 
 ```bash
-# Copy a test video into the ffmpeg-0 pod
-FFMPEG0_POD=$(kubectl get pods -n openfaas-fn -l faas_function=ffmpeg-0 -o jsonpath='{.items[0].metadata.name}')
-kubectl cp /path/to/video.mp4 openfaas-fn/$FFMPEG0_POD:/tmp/test.mp4
+# S3-to-S3 (cloud deployment)
+curl -X POST "$GATEWAY/function/ffmpeg-1" \
+  -d '{"input":"s3://bucket/run_abc/librosa/output.tar.gz","output":"s3://bucket/run_abc/ffmpeg1/clip"}'
 
-# Invoke the function
-curl -s http://127.0.0.1:8080/function/ffmpeg-0 \
+# Local paths (for testing inside the container)
+curl -X POST "http://127.0.0.1:8080/function/ffmpeg-0" \
   -d '{"input":"/tmp/test.mp4","output":"/tmp/out"}'
 ```
 
 ### End-to-End Pipeline Test
 
-To run the full pipeline, each function's output needs to be available as the next function's input. Options:
-
-1. **Shared PersistentVolumeClaim (PVC)**: Mount the same volume in all function pods
-2. **Manual file copying**: Use `kubectl cp` between pods
-3. **Orchestrator function**: Create a controller that chains the functions together
-
-For a PVC-based approach, add a volume configuration to `stack.yml`:
-
-```yaml
-functions:
-  ffmpeg-0:
-    # ... existing config ...
-    volumes:
-      - name: shared-data
-        persistentVolumeClaim:
-          claimName: videosearcher-pvc
-    volumeMounts:
-      - name: shared-data
-        mountPath: /mnt/data
-```
-
-Then all functions can read/write to `/mnt/data/`.
+The full pipeline is tested via JMeter (see [Performance Testing](#performance-testing-jmeter) below). Each test iteration chains all 7 functions using unique S3 prefixes (`run_<UUID>/`) to avoid data collisions across concurrent users.
 
 ---
 
@@ -638,6 +728,63 @@ COPY aisprint-stub /tmp/aisprint-stub
 RUN pip install --no-cache-dir /tmp/aisprint-stub && rm -rf /tmp/aisprint-stub
 ```
 
+### 7. JMeter Pipeline Stopping at ffmpeg-1
+
+**Problem**: When running the JMeter load test, the pipeline consistently stopped at the ffmpeg-1 step. ffmpeg-0 succeeded, librosa sometimes worked, but ffmpeg-1 always showed 100% error rate. Manually calling ffmpeg-1 via `curl` returned HTTP 200 — proving the function worked fine in isolation.
+
+**Root Cause**: Four separate bugs in the JMeter test plan compounded to cause this failure:
+
+**Bug 1 — JSR223PreProcessor generating a new UUID per sampler (not per iteration)**
+
+The `Generate Run ID` PreProcessor was placed at the ThreadGroup level, causing it to execute before *every* sampler in the loop. This meant each pipeline step (ffmpeg-0, librosa, ffmpeg-1, ...) got a different `runId` and `baseOutput`, so ffmpeg-1 looked for librosa's output under the wrong S3 prefix.
+
+*Fix*: Moved the PreProcessor into ffmpeg-0's hashTree so it only runs once at the start of each pipeline iteration.
+
+**Bug 2 — ffmpeg-1 output naming mismatch (`clip_0` vs `clip`)**
+
+The JMX sent output `${baseOutput}ffmpeg1/clip_0` to ffmpeg-1. But ffmpeg-1's code appends `_<index>` to the output base name, producing files like `clip_0_0.mp4` instead of the expected `clip_0.mp4`. The downstream ffmpeg-2 step expected `clip_0.mp4` and couldn't find it.
+
+*Fix*: Changed the JMX ffmpeg-1 output from `clip_0` to `clip`, so clips are named `clip_0.mp4`, `clip_1.mp4`, etc.
+
+**Bug 3 — CSV header row treated as data**
+
+The CSV Data Set had `ignoreFirstLine=false` with `variableNames=input_video`. Since `videos.csv` has a header row (`input_video`), the first thread received the literal string `input_video` as the S3 path instead of an actual video URI.
+
+*Fix*: Set `ignoreFirstLine=true`.
+
+**Bug 4 — Pipeline continuing after failures**
+
+The ThreadGroup had `on_sample_error=continue`, so when one step failed, subsequent steps still executed with invalid/missing input, generating cascading errors that obscured the root cause.
+
+*Fix*: Changed to `on_sample_error=startnextloop` — if any step fails, the thread skips the rest of that iteration and starts fresh.
+
+### 8. Concurrent Request Race Condition (/tmp/s3data)
+
+**Problem**: Even after fixing the JMeter bugs, the pipeline still failed intermittently under concurrent load. librosa showed ~50% error rate, and ffmpeg-1 showed 100% errors in JMeter — yet both worked perfectly when tested individually via `curl`.
+
+**Root Cause**: The OpenFaaS classic watchdog forks a **new process per request**. When multiple concurrent requests land on the same pod, they all shared a single `/tmp/s3data` staging directory. When Request A finished and ran `rm -rf /tmp/s3data`, it **destroyed Request B's in-flight downloaded data**, causing Request B to fail with missing files.
+
+This explained the pattern:
+- ffmpeg-0: 0% errors (requests separated by ramp-up time, short processing)
+- librosa: ~50% errors (longer processing = higher overlap probability)
+- ffmpeg-1: 100% errors (always overlapped with concurrent requests)
+
+**Fix**: Modified `entry.sh` (all 7 functions) and `s3_helper.py` to use **per-invocation staging directories** based on the shell PID:
+
+```bash
+# entry.sh — each fork gets a unique PID
+export S3_STAGING="/tmp/s3data_$$"
+```
+
+```python
+# s3_helper.py — reads the per-invocation path
+S3_STAGING = os.environ.get("S3_STAGING", "/tmp/s3data")
+```
+
+Cleanup only removes that invocation's directory (`rm -rf "$S3_STAGING"`), so concurrent requests on the same pod are fully isolated.
+
+This required rebuilding and redeploying all 7 Docker images.
+
 ---
 
 ## Function Details
@@ -688,19 +835,45 @@ Performance tests are executed using **Apache JMeter** to measure response times
 
 ### Test Plan Overview
 
-The test plan (`jmeter-tests/videosearcher-load-test.jmx`) simulates realistic user behavior:
+The test plan (`jmeter-tests/videosearcher-load-test.jmx`) simulates realistic user behavior with **S3-backed data flow** between pipeline stages:
 
-1. A virtual user sends a POST request to a function endpoint
-2. Receives and reads the response
-3. **Waits 20 seconds** (think time) — simulating a real user reading the response
-4. Sends the next request to the next function in the pipeline
-5. Repeats for the configured test duration
+1. A Groovy PreProcessor generates a unique `runId` (UUID) and `baseOutput` S3 prefix at the start of each iteration
+2. Each virtual user sends a POST request with S3 input/output paths to the function endpoint
+3. The function downloads input from S3, processes it, uploads output to S3
+4. **Waits ~20 seconds** (exponential think time) — simulating a real user
+5. The next function in the pipeline reads the previous function's S3 output as its input
+6. Repeats for the configured test duration
 
-Each virtual user calls all **7 functions in pipeline order**:
+The test uses a CSV data source (`videos.csv`) containing S3 URIs for input videos:
+```
+input_video
+s3://cloud-pipeline-loadtest-sharma/vid1.mp4
+s3://cloud-pipeline-loadtest-sharma/vid2.mp4
+```
+
+Each virtual user calls all **7 functions in pipeline order**, with S3 paths following the subfolder convention:
 
 ```
 ffmpeg-0 → librosa-fn → ffmpeg-1 → ffmpeg-2 → ffmpeg-3 → deepspeech-fn → object-detector
+
+S3 paths per iteration:
+  Input:  s3://bucket/vid1.mp4
+  ffmpeg-0 output: s3://bucket/run_<UUID>/ffmpeg0/output
+  librosa  input:  s3://bucket/run_<UUID>/ffmpeg0/output.tar.gz
+  librosa  output: s3://bucket/run_<UUID>/librosa/output
+  ffmpeg-1 input:  s3://bucket/run_<UUID>/librosa/output.tar.gz
+  ffmpeg-1 output: s3://bucket/run_<UUID>/ffmpeg1/clip
+  ffmpeg-2 input:  s3://bucket/run_<UUID>/ffmpeg1/clip_0.mp4
+  ffmpeg-2 output: s3://bucket/run_<UUID>/ffmpeg2/clip_0
+  ffmpeg-3 input:  s3://bucket/run_<UUID>/ffmpeg2/clip_0.tar.gz
+  ffmpeg-3 output: s3://bucket/run_<UUID>/ffmpeg3/frame
+  deepspeech input:  s3://bucket/run_<UUID>/ffmpeg2/clip_0.tar.gz
+  deepspeech output: s3://bucket/run_<UUID>/deepspeech/clip_0
+  object-detector input:  s3://bucket/run_<UUID>/ffmpeg3/frame-1.jpg
+  object-detector output: s3://bucket/run_<UUID>/objdetect/frame-1
 ```
+
+Note: The test processes only the first clip (`clip_0`) through the later stages. Deepspeech and ffmpeg-3 both read from ffmpeg-2's output (parallel branches). If any step fails, `startnextloop` skips the rest of that iteration.
 
 ### Load Configuration
 
@@ -853,7 +1026,7 @@ All parameters can be overridden via JMeter properties (`-J` flags):
 | `thinktime` | 20000 | Think time in milliseconds |
 | `rampup` | 10 | Ramp-up period in seconds |
 | `duration` | 300 | Test duration in seconds |
-| `host` | 127.0.0.1 | OpenFaaS gateway host |
+| `host` | ELB hostname | OpenFaaS gateway host |
 | `port` | 8080 | OpenFaaS gateway port |
 | `loops` | -1 | Loop count (-1 = infinite, controlled by duration) |
 
@@ -1265,8 +1438,8 @@ Estimated monthly cost for the deployment as configured:
 
 ## Future Improvements
 
-1. **Shared Volume (EFS)**: Set up an Amazon EFS `PersistentVolumeClaim` with `ReadWriteMany` access so all functions can share input/output data without `kubectl cp`
-2. **Pipeline Orchestrator**: Build a controller function that chains the 7 stages together automatically
+1. **Pipeline Orchestrator**: Build a controller function that chains the 7 stages together automatically instead of relying on the JMeter test plan to drive the sequence
+2. **Dynamic Clip Count Handling**: Currently the JMeter test only processes `clip_0` through later stages; a smarter test would parse ffmpeg-1's output to discover how many clips were produced and iterate over all of them
 3. **ARM64 DeepSpeech Alternative**: Replace DeepSpeech with a speech-to-text model that has native ARM64 support (e.g., Whisper)
 4. **Private Registry (ECR)**: Migrate from public Docker Hub to Amazon ECR for faster in-region pulls and private image storage (requires OpenFaaS Pro)
 5. **Model Download at Runtime**: Instead of bundling large model files (~1.1GB for DeepSpeech) in the Docker image, download them at container startup from S3

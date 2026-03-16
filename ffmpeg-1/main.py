@@ -21,6 +21,7 @@ def main(args):
 
     input_dir = os.path.dirname(orig_input)
     output_dir = os.path.dirname(orig_output)
+    os.makedirs(output_dir, exist_ok=True)
     output_name = os.path.basename(orig_output)
     
     command = "tar -xvzf %s -C %s" % (orig_input, output_dir)
