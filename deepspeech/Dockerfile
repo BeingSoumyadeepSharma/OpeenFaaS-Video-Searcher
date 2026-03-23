@@ -29,6 +29,7 @@ COPY deepspeech/deepspeech-0.9.3-models.scorer .
 
 # Copy S3 helper script (transparent S3 download/upload wrapper)
 COPY s3-wrapper/s3_helper.py .
+COPY s3-wrapper/queue_helper.py .
 
 # Copy original code — UNTOUCHED
 COPY deepspeech/main.py .

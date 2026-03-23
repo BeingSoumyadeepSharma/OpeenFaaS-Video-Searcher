@@ -54,6 +54,14 @@ This project deploys the **VideoSearcher** AI-SPRINT video processing pipeline a
   - [Running the Tests](#running-the-tests)
   - [Analyzing Results](#analyzing-results)
   - [Test Files Reference](#test-files-reference)
+- [OpenFaaS Queue Orchestration (SQS, No Lambda)](#openfaas-queue-orchestration-sqs-no-lambda)
+  - [Quick Start (SQS Mode)](#quick-start-sqs-mode)
+  - [How Queue Chaining Works](#how-queue-chaining-works)
+  - [What We Changed to Make It Work](#what-we-changed-to-make-it-work)
+  - [End-to-End Setup Steps (Exact Flow)](#end-to-end-setup-steps-exact-flow)
+  - [Queue Message Contract](#queue-message-contract)
+  - [Stage Mapping Reference](#stage-mapping-reference)
+  - [Troubleshooting Notes from This Setup](#troubleshooting-notes-from-this-setup)
 - [Cloud Deployment (AWS EKS)](#cloud-deployment-aws-eks)
   - [Why AWS EKS?](#why-aws-eks)
   - [Cloud Environment Comparison](#cloud-environment-comparison)
@@ -632,7 +640,7 @@ curl -X POST "http://127.0.0.1:8080/function/ffmpeg-0" \
 
 ### End-to-End Pipeline Test
 
-The full pipeline is tested via JMeter (see [Performance Testing](#performance-testing-jmeter) below). Each test iteration chains all 7 functions using unique S3 prefixes (`run_<UUID>/`) to avoid data collisions across concurrent users.
+The recommended end-to-end execution path is now **OpenFaaS queue orchestration** (see [OpenFaaS Queue Orchestration (SQS, No Lambda)](#openfaas-queue-orchestration-sqs-no-lambda) below). JMeter remains useful for performance/load testing.
 
 ---
 
@@ -1029,6 +1037,379 @@ All parameters can be overridden via JMeter properties (`-J` flags):
 | `host` | ELB hostname | OpenFaaS gateway host |
 | `port` | 8080 | OpenFaaS gateway port |
 | `loops` | -1 | Loop count (-1 = infinite, controlled by duration) |
+
+---
+
+## OpenFaaS Queue Orchestration (SQS, No Lambda)
+
+This project now supports queue chaining **without AWS Lambda**.
+
+- JMeter calls only the first function (`ffmpeg-0`)
+- Each OpenFaaS function publishes the next-stage SQS message itself
+- SQS bridge consumers drain each queue and invoke the next OpenFaaS endpoint
+
+Important: queue messages should carry **S3 URI pointers and metadata**, not binary artifacts. Intermediate outputs are written to S3 and passed between stages by URI.
+
+### Quick Start (SQS Mode)
+
+If you only want the shortest path to a working SQS-based run, follow these steps.
+
+1. Build and deploy functions:
+
+```bash
+./build.sh
+faas-cli deploy -f stack.yml
+```
+
+2. Create the six queues in `us-east-1`:
+
+```bash
+aws sqs create-queue --queue-name videosearcher-ffmpeg0-to-librosa --region us-east-1
+aws sqs create-queue --queue-name videosearcher-librosa-to-ffmpeg1 --region us-east-1
+aws sqs create-queue --queue-name videosearcher-ffmpeg1-to-ffmpeg2 --region us-east-1
+aws sqs create-queue --queue-name videosearcher-ffmpeg2-to-ffmpeg3 --region us-east-1
+aws sqs create-queue --queue-name videosearcher-ffmpeg2-to-deepspeech --region us-east-1
+aws sqs create-queue --queue-name videosearcher-ffmpeg3-to-object --region us-east-1
+```
+
+3. Resolve queue URLs and put them into `stack.yml` under `NEXT_QUEUES_JSON`, then redeploy:
+
+```bash
+AWS_PAGER="" aws sqs get-queue-url --queue-name videosearcher-ffmpeg0-to-librosa --region us-east-1 --query QueueUrl --output text
+AWS_PAGER="" aws sqs get-queue-url --queue-name videosearcher-librosa-to-ffmpeg1 --region us-east-1 --query QueueUrl --output text
+AWS_PAGER="" aws sqs get-queue-url --queue-name videosearcher-ffmpeg1-to-ffmpeg2 --region us-east-1 --query QueueUrl --output text
+AWS_PAGER="" aws sqs get-queue-url --queue-name videosearcher-ffmpeg2-to-ffmpeg3 --region us-east-1 --query QueueUrl --output text
+AWS_PAGER="" aws sqs get-queue-url --queue-name videosearcher-ffmpeg2-to-deepspeech --region us-east-1 --query QueueUrl --output text
+AWS_PAGER="" aws sqs get-queue-url --queue-name videosearcher-ffmpeg3-to-object --region us-east-1 --query QueueUrl --output text
+
+faas-cli deploy -f stack.yml
+```
+
+4. Deploy the SQS bridge consumers:
+
+```bash
+docker build -t soumyadeeps/sqs-bridge:latest sqs-bridge
+docker push soumyadeeps/sqs-bridge:latest
+kubectl apply -f k8s/sqs-bridge.yaml
+kubectl get pods -n openfaas-fn | grep sqs-bridge
+```
+
+5. Ensure IAM permissions are present for the EKS node/IRSA role:
+
+- producers: `sqs:SendMessage`, `sqs:GetQueueAttributes`, `sqs:GetQueueUrl`
+- consumers: `sqs:ReceiveMessage`, `sqs:DeleteMessage`, `sqs:ChangeMessageVisibility`, `sqs:GetQueueAttributes`, `sqs:GetQueueUrl`
+
+6. Run a clean stage-1-only JMeter test:
+
+```bash
+cd jmeter-tests
+GATEWAY_HOST=<your-ELB-host> GATEWAY_PORT=8080 THINK_TIME=5000 DURATION=60 ./run-tests.sh 5
+```
+
+7. Verify queue-driven chain execution:
+
+```bash
+faas-cli list --gateway http://<your-ELB-host>:8080
+kubectl logs -n openfaas-fn deploy/sqs-bridge-ffmpeg0-to-librosa --tail=100
+```
+
+If `ffmpeg-0` returns HTTP 200 and downstream invocation counts increase, SQS orchestration is working.
+
+### How Queue Chaining Works
+
+```text
+JMeter -> OpenFaaS ffmpeg-0
+      -> SQS (ffmpeg-0 to librosa)
+      -> OpenFaaS librosa-fn
+      -> SQS (librosa to ffmpeg-1)
+      -> OpenFaaS ffmpeg-1
+      -> SQS (ffmpeg-1 to ffmpeg-2)
+      -> OpenFaaS ffmpeg-2
+  -> fan-out to SQS ffmpeg-3 + SQS deepspeech
+      -> OpenFaaS ffmpeg-3
+  -> SQS (ffmpeg-3 to object-detector)
+  -> OpenFaaS deepspeech-fn / object-detector
+```
+
+### What We Changed to Make It Work
+
+The following implementation changes were made so queue orchestration runs fully inside OpenFaaS (no Lambda):
+
+1. Added queue publisher helper:
+   - `s3-wrapper/queue_helper.py`
+   - Adds stage-aware SQS publish logic (`run_id`, `root_prefix`, `input`, `output`, `source_stage`)
+2. Updated all function wrappers to publish next-stage messages on success:
+   - `ffmpeg-0/entry.sh`
+   - `librosa/entry.sh`
+   - `ffmpeg-1/entry.sh`
+   - `ffmpeg-2/entry.sh`
+   - `ffmpeg-3/entry.sh`
+   - `deepspeech/entry.sh`
+   - `object-detector/entry.sh`
+3. Updated all function Dockerfiles to include queue helper in image:
+   - Added `COPY s3-wrapper/queue_helper.py .` (or equivalent) to every function image build
+4. Updated OpenFaaS stack routing metadata:
+   - `stack.yml`
+   - Added per-function `CURRENT_STAGE` and `NEXT_QUEUES_JSON`
+   - Added fan-out routing from `ffmpeg-2` to `ffmpeg-3` and `deepspeech-fn`
+5. Updated JMeter to stage-1 trigger only:
+   - `jmeter-tests/videosearcher-load-test.jmx`
+   - Keeps only `ffmpeg-0` active, downstream samplers disabled
+   - Sends `run_id` and `root_prefix` for queue chaining
+6. Added SQS bridge workers (queue consumers) to trigger OpenFaaS endpoints:
+   - `sqs-bridge/consumer.py`
+   - `sqs-bridge/Dockerfile`
+   - `sqs-bridge/requirements.txt`
+   - `k8s/sqs-bridge.yaml`
+   - `sqs-bridge/deploy.sh`
+7. Hardened builds for reliability:
+   - `object-detector/Dockerfile` apt retry/mirror hardening
+   - `build.sh` image build retry wrapper
+
+### End-to-End Setup Steps (Exact Flow)
+
+Use this sequence to reproduce a working SQS-driven setup from scratch.
+
+#### Step 1: Build and Deploy All OpenFaaS Functions
+
+```bash
+chmod +x build.sh
+./build.sh
+
+# Push images (example)
+docker login
+for fn in ffmpeg-0 ffmpeg-1 ffmpeg-2 ffmpeg-3 librosa-fn deepspeech-fn object-detector; do
+  docker push soumyadeeps/${fn}:latest
+done
+
+# Deploy functions
+faas-cli deploy -f stack.yml
+```
+
+#### Step 2: Create the Six SQS Queues
+
+```bash
+aws sqs create-queue --queue-name videosearcher-ffmpeg0-to-librosa --region us-east-1
+aws sqs create-queue --queue-name videosearcher-librosa-to-ffmpeg1 --region us-east-1
+aws sqs create-queue --queue-name videosearcher-ffmpeg1-to-ffmpeg2 --region us-east-1
+aws sqs create-queue --queue-name videosearcher-ffmpeg2-to-ffmpeg3 --region us-east-1
+aws sqs create-queue --queue-name videosearcher-ffmpeg2-to-deepspeech --region us-east-1
+aws sqs create-queue --queue-name videosearcher-ffmpeg3-to-object --region us-east-1
+```
+
+Resolve queue URLs and use those exact URLs in configuration:
+
+```bash
+AWS_PAGER="" aws sqs get-queue-url --queue-name videosearcher-ffmpeg0-to-librosa --region us-east-1 --query QueueUrl --output text
+AWS_PAGER="" aws sqs get-queue-url --queue-name videosearcher-librosa-to-ffmpeg1 --region us-east-1 --query QueueUrl --output text
+AWS_PAGER="" aws sqs get-queue-url --queue-name videosearcher-ffmpeg1-to-ffmpeg2 --region us-east-1 --query QueueUrl --output text
+AWS_PAGER="" aws sqs get-queue-url --queue-name videosearcher-ffmpeg2-to-ffmpeg3 --region us-east-1 --query QueueUrl --output text
+AWS_PAGER="" aws sqs get-queue-url --queue-name videosearcher-ffmpeg2-to-deepspeech --region us-east-1 --query QueueUrl --output text
+AWS_PAGER="" aws sqs get-queue-url --queue-name videosearcher-ffmpeg3-to-object --region us-east-1 --query QueueUrl --output text
+```
+
+#### Step 3: Configure Queue Routing in stack.yml
+
+For each function in `stack.yml`:
+
+- set `CURRENT_STAGE` to the function stage key
+- set `NEXT_QUEUES_JSON` to a JSON array of objects:
+  - `queue_url`: full SQS queue URL
+  - `target_stage`: next stage name used by queue helper
+
+Example format:
+
+```yaml
+environment:
+  CURRENT_STAGE: ffmpeg-2
+  NEXT_QUEUES_JSON: >-
+    [
+      {"queue_url":"https://sqs.us-east-1.amazonaws.com/<acct>/videosearcher-ffmpeg2-to-ffmpeg3","target_stage":"ffmpeg-3"},
+      {"queue_url":"https://sqs.us-east-1.amazonaws.com/<acct>/videosearcher-ffmpeg2-to-deepspeech","target_stage":"deepspeech"}
+    ]
+```
+
+Then redeploy:
+
+```bash
+faas-cli deploy -f stack.yml
+```
+
+#### Step 4: Grant IAM Permissions (Critical)
+
+The EKS node role (or IRSA role if used) must have SQS permissions.
+
+Minimum required actions:
+
+- Producer side (function wrappers):
+  - `sqs:SendMessage`
+  - `sqs:GetQueueAttributes`
+  - `sqs:GetQueueUrl`
+- Consumer side (sqs-bridge):
+  - `sqs:ReceiveMessage`
+  - `sqs:DeleteMessage`
+  - `sqs:ChangeMessageVisibility`
+  - `sqs:GetQueueAttributes`
+  - `sqs:GetQueueUrl`
+
+Common failure if missing:
+
+- ffmpeg-0 returns HTTP 500
+- logs show `AccessDenied` for `sqs:SendMessage`
+
+#### Step 5: Deploy the SQS Bridge Consumers
+
+This setup uses custom bridge pods to poll SQS and invoke OpenFaaS HTTP endpoints.
+
+```bash
+# Build and push bridge image
+docker build -t soumyadeeps/sqs-bridge:latest sqs-bridge
+docker push soumyadeeps/sqs-bridge:latest
+
+# Deploy bridges
+kubectl apply -f k8s/sqs-bridge.yaml
+kubectl get pods -n openfaas-fn | grep sqs-bridge
+```
+
+`k8s/sqs-bridge.yaml` should define one deployment per queue mapping:
+
+- ffmpeg0->librosa (`/function/librosa-fn`)
+- librosa->ffmpeg1 (`/function/ffmpeg-1`)
+- ffmpeg1->ffmpeg2 (`/function/ffmpeg-2`)
+- ffmpeg2->ffmpeg3 (`/function/ffmpeg-3`)
+- ffmpeg2->deepspeech (`/function/deepspeech-fn`)
+- ffmpeg3->object (`/function/object-detector`)
+
+#### Step 6: Update JMeter to Trigger Only Stage 1
+
+`jmeter-tests/videosearcher-load-test.jmx` should send only ffmpeg-0 requests.
+
+Payload shape:
+
+```json
+{
+  "run_id": "${runId}",
+  "input": "${input_video}",
+  "output": "s3://cloud-pipeline-loadtest-sharma/run_${runId}/ffmpeg0/output",
+  "root_prefix": "s3://cloud-pipeline-loadtest-sharma/run_${runId}"
+}
+```
+
+After this request, all downstream stages are queue-driven.
+
+#### Step 7: Purge Queues Before Baseline Runs
+
+Before each clean benchmark (5/10/15 users), purge all six queues and wait ~60 seconds:
+
+```bash
+for q in \
+  videosearcher-ffmpeg0-to-librosa \
+  videosearcher-librosa-to-ffmpeg1 \
+  videosearcher-ffmpeg1-to-ffmpeg2 \
+  videosearcher-ffmpeg2-to-ffmpeg3 \
+  videosearcher-ffmpeg2-to-deepspeech \
+  videosearcher-ffmpeg3-to-object; do
+  url=$(AWS_PAGER="" aws sqs get-queue-url --queue-name "$q" --region us-east-1 --query QueueUrl --output text)
+  aws sqs purge-queue --queue-url "$url" --region us-east-1
+done
+
+sleep 65
+```
+
+Then verify empty queues (`0 0` visible/not-visible):
+
+```bash
+for q in \
+  videosearcher-ffmpeg0-to-librosa \
+  videosearcher-librosa-to-ffmpeg1 \
+  videosearcher-ffmpeg1-to-ffmpeg2 \
+  videosearcher-ffmpeg2-to-ffmpeg3 \
+  videosearcher-ffmpeg2-to-deepspeech \
+  videosearcher-ffmpeg3-to-object; do
+  url=$(AWS_PAGER="" aws sqs get-queue-url --queue-name "$q" --region us-east-1 --query QueueUrl --output text)
+  echo -n "$q "
+  aws sqs get-queue-attributes --queue-url "$url" --region us-east-1 \
+    --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+    --query 'Attributes.[ApproximateNumberOfMessages,ApproximateNumberOfMessagesNotVisible]' \
+    --output text
+done
+```
+
+#### Step 8: Run Load Tests
+
+```bash
+cd jmeter-tests
+
+# 5, 10, 15-user baselines
+GATEWAY_HOST=<your-ELB-host> GATEWAY_PORT=8080 THINK_TIME=5000 DURATION=60 ./run-tests.sh 5
+GATEWAY_HOST=<your-ELB-host> GATEWAY_PORT=8080 THINK_TIME=5000 DURATION=60 ./run-tests.sh 10
+GATEWAY_HOST=<your-ELB-host> GATEWAY_PORT=8080 THINK_TIME=5000 DURATION=60 ./run-tests.sh 15
+```
+
+#### Step 9: Validate End-to-End Success
+
+Validation checklist:
+
+1. Stage-1 request returns HTTP 200.
+2. SQS bridge logs show receive -> invoke -> delete loop.
+3. `faas-cli list --gateway ...` invocation counters increase for all downstream functions.
+4. JMeter JTL summaries show 0 failures for ffmpeg-0 requests.
+
+### Queue Message Contract
+
+Queue message format produced by wrappers:
+
+```json
+{
+  "run_id": "<uuid>",
+  "source_stage": "ffmpeg-0",
+  "root_prefix": "s3://bucket/run_<uuid>",
+  "input": "s3://bucket/run_<uuid>/ffmpeg0/output.tar.gz",
+  "output": "s3://bucket/run_<uuid>/librosa/output"
+}
+```
+
+Notes:
+
+- `run_id` keeps all stage artifacts grouped per pipeline execution.
+- `root_prefix` allows deterministic derivation of later stage paths.
+- `input` and `output` are always S3 URIs (pointers), not payload blobs.
+
+### Stage Mapping Reference
+
+| Source Stage | Queue | Target Function | Target Stage Key |
+|-------------|-------|-----------------|------------------|
+| ffmpeg-0 | videosearcher-ffmpeg0-to-librosa | librosa-fn | librosa |
+| librosa | videosearcher-librosa-to-ffmpeg1 | ffmpeg-1 | ffmpeg-1 |
+| ffmpeg-1 | videosearcher-ffmpeg1-to-ffmpeg2 | ffmpeg-2 | ffmpeg-2 |
+| ffmpeg-2 | videosearcher-ffmpeg2-to-ffmpeg3 | ffmpeg-3 | ffmpeg-3 |
+| ffmpeg-2 | videosearcher-ffmpeg2-to-deepspeech | deepspeech-fn | deepspeech |
+| ffmpeg-3 | videosearcher-ffmpeg3-to-object | object-detector | object-detector |
+
+### Troubleshooting Notes from This Setup
+
+1. **`AccessDenied` on `SendMessage`**
+   - Symptom: ffmpeg-0 returns 500, queue publish fails.
+   - Fix: Add `sqs:SendMessage` and related read actions to node/IRSA role.
+2. **Queue URL account mismatch (`InvalidAddress`)**
+   - Symptom: purge/get attributes fails for seemingly correct URL.
+   - Fix: always resolve URLs with `get-queue-url` in the active account/region.
+3. **Bridge not deployed**
+   - Symptom: messages accumulate, downstream functions never trigger.
+   - Fix: deploy `k8s/sqs-bridge.yaml` and check bridge pod logs.
+4. **Stale messages affect new tests**
+   - Symptom: unexpected old payloads or malformed records in new run.
+   - Fix: purge all queues and wait propagation window before each clean baseline.
+
+Default output prefixes are auto-derived per stage:
+
+- `ffmpeg-0` -> `.../ffmpeg0`
+- `librosa` -> `.../librosa`
+- `ffmpeg-1` -> `.../ffmpeg1`
+- `ffmpeg-2` -> `.../ffmpeg2`
+- `ffmpeg-3` -> `.../ffmpeg3`
+- `deepspeech` -> `.../deepspeech`
+- `object-detector` -> `.../objdetect`
 
 ---
 

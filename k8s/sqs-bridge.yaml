@@ -1,0 +1,263 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sqs-bridge
+  namespace: openfaas-fn
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sqs-bridge-ffmpeg0-to-librosa
+  namespace: openfaas-fn
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sqs-bridge-ffmpeg0-to-librosa
+  template:
+    metadata:
+      labels:
+        app: sqs-bridge-ffmpeg0-to-librosa
+    spec:
+      serviceAccountName: sqs-bridge
+      containers:
+        - name: bridge
+          image: soumyadeeps/videosearcher-sqs-bridge:latest
+          imagePullPolicy: Always
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
+            - name: GATEWAY_URL
+              value: http://gateway.openfaas:8080
+            - name: QUEUE_URL
+              value: https://sqs.us-east-1.amazonaws.com/249934838928/videosearcher-ffmpeg0-to-librosa
+            - name: TARGET_FUNCTION
+              value: librosa-fn
+            - name: WAIT_TIME_SECONDS
+              value: "20"
+            - name: VISIBILITY_TIMEOUT_SECONDS
+              value: "600"
+            - name: REQUEST_TIMEOUT_SECONDS
+              value: "900"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sqs-bridge-librosa-to-ffmpeg1
+  namespace: openfaas-fn
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sqs-bridge-librosa-to-ffmpeg1
+  template:
+    metadata:
+      labels:
+        app: sqs-bridge-librosa-to-ffmpeg1
+    spec:
+      serviceAccountName: sqs-bridge
+      containers:
+        - name: bridge
+          image: soumyadeeps/videosearcher-sqs-bridge:latest
+          imagePullPolicy: Always
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
+            - name: GATEWAY_URL
+              value: http://gateway.openfaas:8080
+            - name: QUEUE_URL
+              value: https://sqs.us-east-1.amazonaws.com/249934838928/videosearcher-librosa-to-ffmpeg1
+            - name: TARGET_FUNCTION
+              value: ffmpeg-1
+            - name: WAIT_TIME_SECONDS
+              value: "20"
+            - name: VISIBILITY_TIMEOUT_SECONDS
+              value: "600"
+            - name: REQUEST_TIMEOUT_SECONDS
+              value: "900"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sqs-bridge-ffmpeg1-to-ffmpeg2
+  namespace: openfaas-fn
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sqs-bridge-ffmpeg1-to-ffmpeg2
+  template:
+    metadata:
+      labels:
+        app: sqs-bridge-ffmpeg1-to-ffmpeg2
+    spec:
+      serviceAccountName: sqs-bridge
+      containers:
+        - name: bridge
+          image: soumyadeeps/videosearcher-sqs-bridge:latest
+          imagePullPolicy: Always
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
+            - name: GATEWAY_URL
+              value: http://gateway.openfaas:8080
+            - name: QUEUE_URL
+              value: https://sqs.us-east-1.amazonaws.com/249934838928/videosearcher-ffmpeg1-to-ffmpeg2
+            - name: TARGET_FUNCTION
+              value: ffmpeg-2
+            - name: WAIT_TIME_SECONDS
+              value: "20"
+            - name: VISIBILITY_TIMEOUT_SECONDS
+              value: "600"
+            - name: REQUEST_TIMEOUT_SECONDS
+              value: "900"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sqs-bridge-ffmpeg2-to-ffmpeg3
+  namespace: openfaas-fn
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sqs-bridge-ffmpeg2-to-ffmpeg3
+  template:
+    metadata:
+      labels:
+        app: sqs-bridge-ffmpeg2-to-ffmpeg3
+    spec:
+      serviceAccountName: sqs-bridge
+      containers:
+        - name: bridge
+          image: soumyadeeps/videosearcher-sqs-bridge:latest
+          imagePullPolicy: Always
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
+            - name: GATEWAY_URL
+              value: http://gateway.openfaas:8080
+            - name: QUEUE_URL
+              value: https://sqs.us-east-1.amazonaws.com/249934838928/videosearcher-ffmpeg2-to-ffmpeg3
+            - name: TARGET_FUNCTION
+              value: ffmpeg-3
+            - name: WAIT_TIME_SECONDS
+              value: "20"
+            - name: VISIBILITY_TIMEOUT_SECONDS
+              value: "600"
+            - name: REQUEST_TIMEOUT_SECONDS
+              value: "900"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sqs-bridge-ffmpeg2-to-deepspeech
+  namespace: openfaas-fn
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sqs-bridge-ffmpeg2-to-deepspeech
+  template:
+    metadata:
+      labels:
+        app: sqs-bridge-ffmpeg2-to-deepspeech
+    spec:
+      serviceAccountName: sqs-bridge
+      containers:
+        - name: bridge
+          image: soumyadeeps/videosearcher-sqs-bridge:latest
+          imagePullPolicy: Always
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
+            - name: GATEWAY_URL
+              value: http://gateway.openfaas:8080
+            - name: QUEUE_URL
+              value: https://sqs.us-east-1.amazonaws.com/249934838928/videosearcher-ffmpeg2-to-deepspeech
+            - name: TARGET_FUNCTION
+              value: deepspeech-fn
+            - name: WAIT_TIME_SECONDS
+              value: "20"
+            - name: VISIBILITY_TIMEOUT_SECONDS
+              value: "600"
+            - name: REQUEST_TIMEOUT_SECONDS
+              value: "900"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sqs-bridge-ffmpeg3-to-object
+  namespace: openfaas-fn
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sqs-bridge-ffmpeg3-to-object
+  template:
+    metadata:
+      labels:
+        app: sqs-bridge-ffmpeg3-to-object
+    spec:
+      serviceAccountName: sqs-bridge
+      containers:
+        - name: bridge
+          image: soumyadeeps/videosearcher-sqs-bridge:latest
+          imagePullPolicy: Always
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
+            - name: GATEWAY_URL
+              value: http://gateway.openfaas:8080
+            - name: QUEUE_URL
+              value: https://sqs.us-east-1.amazonaws.com/249934838928/videosearcher-ffmpeg3-to-object
+            - name: TARGET_FUNCTION
+              value: object-detector
+            - name: WAIT_TIME_SECONDS
+              value: "20"
+            - name: VISIBILITY_TIMEOUT_SECONDS
+              value: "600"
+            - name: REQUEST_TIMEOUT_SECONDS
+              value: "900"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi

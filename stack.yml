@@ -11,6 +11,10 @@
 # S3 Support:
 #   All functions now support S3 paths (s3://bucket/key) for input and output.
 #   Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY below (or use IRSA on EKS).
+# Queue Chaining (OpenFaaS, no Lambda):
+#   JMeter should call only ffmpeg-0.
+#   Each function publishes the next-stage SQS message using NEXT_QUEUES_JSON.
+#   Replace queue_url placeholders below with your real SQS queue URLs.
 #   Invoke with S3:
 #     curl -X POST http://<gateway>/function/ffmpeg-0 \
 #       -d '{"input":"s3://my-bucket/videos/input.mp4","output":"s3://my-bucket/results/ffmpeg0"}'
@@ -31,6 +35,8 @@ functions:
       exec_timeout: "600s"
       # AWS credentials for S3 support (leave empty if using IRSA on EKS)
       AWS_DEFAULT_REGION: "us-east-1"
+      CURRENT_STAGE: "ffmpeg-0"
+      NEXT_QUEUES_JSON: "[{\"queue_url\":\"https://sqs.us-east-1.amazonaws.com/249934838928/videosearcher-ffmpeg0-to-librosa\",\"stage\":\"librosa\"}]"
       # AWS_ACCESS_KEY_ID: ""
       # AWS_SECRET_ACCESS_KEY: ""
     labels:
@@ -52,6 +58,8 @@ functions:
       read_timeout: "600s"
       exec_timeout: "600s"
       AWS_DEFAULT_REGION: "us-east-1"
+      CURRENT_STAGE: "ffmpeg-1"
+      NEXT_QUEUES_JSON: "[{\"queue_url\":\"https://sqs.us-east-1.amazonaws.com/249934838928/videosearcher-ffmpeg1-to-ffmpeg2\",\"stage\":\"ffmpeg-2\"}]"
     labels:
       com.openfaas.scale.min: "1"
       com.openfaas.scale.max: "5"
@@ -69,6 +77,8 @@ functions:
       read_timeout: "600s"
       exec_timeout: "600s"
       AWS_DEFAULT_REGION: "us-east-1"
+      CURRENT_STAGE: "ffmpeg-2"
+      NEXT_QUEUES_JSON: "[{\"queue_url\":\"https://sqs.us-east-1.amazonaws.com/249934838928/videosearcher-ffmpeg2-to-ffmpeg3\",\"stage\":\"ffmpeg-3\"},{\"queue_url\":\"https://sqs.us-east-1.amazonaws.com/249934838928/videosearcher-ffmpeg2-to-deepspeech\",\"stage\":\"deepspeech\"}]"
     labels:
       com.openfaas.scale.min: "1"
       com.openfaas.scale.max: "5"
@@ -86,6 +96,8 @@ functions:
       read_timeout: "600s"
       exec_timeout: "600s"
       AWS_DEFAULT_REGION: "us-east-1"
+      CURRENT_STAGE: "ffmpeg-3"
+      NEXT_QUEUES_JSON: "[{\"queue_url\":\"https://sqs.us-east-1.amazonaws.com/249934838928/videosearcher-ffmpeg3-to-object\",\"stage\":\"object-detector\"}]"
     labels:
       com.openfaas.scale.min: "1"
       com.openfaas.scale.max: "5"
@@ -103,6 +115,8 @@ functions:
       read_timeout: "600s"
       exec_timeout: "600s"
       AWS_DEFAULT_REGION: "us-east-1"
+      CURRENT_STAGE: "librosa"
+      NEXT_QUEUES_JSON: "[{\"queue_url\":\"https://sqs.us-east-1.amazonaws.com/249934838928/videosearcher-librosa-to-ffmpeg1\",\"stage\":\"ffmpeg-1\"}]"
     labels:
       com.openfaas.scale.min: "1"
       com.openfaas.scale.max: "3"
@@ -120,6 +134,8 @@ functions:
       read_timeout: "600s"
       exec_timeout: "600s"
       AWS_DEFAULT_REGION: "us-east-1"
+      CURRENT_STAGE: "deepspeech"
+      NEXT_QUEUES_JSON: "[]"
     labels:
       com.openfaas.scale.min: "1"
       com.openfaas.scale.max: "3"
@@ -137,6 +153,8 @@ functions:
       read_timeout: "600s"
       exec_timeout: "600s"
       AWS_DEFAULT_REGION: "us-east-1"
+      CURRENT_STAGE: "object-detector"
+      NEXT_QUEUES_JSON: "[]"
     labels:
       com.openfaas.scale.min: "1"
       com.openfaas.scale.max: "3"

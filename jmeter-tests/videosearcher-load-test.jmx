@@ -76,7 +76,7 @@
         </collectionProp>
       </HeaderManager>
       <hashTree/>
-      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="All Functions - Sequential Pipeline">
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Queue Pipeline Trigger - Stage 1 Only">
         <stringProp name="ThreadGroup.num_threads">${USERS}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">${RAMP_UP}</stringProp>
         <stringProp name="ThreadGroup.duration">${DURATION}</stringProp>
@@ -113,7 +113,7 @@
             <collectionProp name="Arguments.arguments">
               <elementProp name="" elementType="HTTPArgument">
                 <boolProp name="HTTPArgument.always_encode">false</boolProp>
-                <stringProp name="Argument.value">{&quot;input&quot;:&quot;${input_video}&quot;,&quot;output&quot;:&quot;${baseOutput}ffmpeg0/output&quot;}</stringProp>
+                <stringProp name="Argument.value">{&quot;run_id&quot;:&quot;${runId}&quot;,&quot;input&quot;:&quot;${input_video}&quot;,&quot;output&quot;:&quot;${baseOutput}ffmpeg0&quot;,&quot;root_prefix&quot;:&quot;${rootPrefix}&quot;}</stringProp>
                 <stringProp name="Argument.metadata">=</stringProp>
               </elementProp>
             </collectionProp>
@@ -133,7 +133,10 @@ def bucket = &quot;cloud-pipeline-loadtest-sharma&quot;
 vars.put(&quot;bucket&quot;, bucket)
 
 def baseOutput = &quot;s3://&quot; + bucket + &quot;/run_&quot; + runId + &quot;/&quot;
-vars.put(&quot;baseOutput&quot;, baseOutput)</stringProp>
+vars.put(&quot;baseOutput&quot;, baseOutput)
+
+def rootPrefix = &quot;s3://&quot; + bucket + &quot;/run_&quot; + runId
+vars.put(&quot;rootPrefix&quot;, rootPrefix)</stringProp>
             <stringProp name="scriptLanguage">groovy</stringProp>
           </JSR223PreProcessor>
           <hashTree/>
@@ -153,7 +156,7 @@ double delay = -mean * Math.log(1 - random)
 return delay as long</stringProp>
         </JSR223Timer>
         <hashTree/>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="librosa-fn (Speech Detection)" enabled="true">
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="librosa-fn (Speech Detection)" enabled="false">
           <stringProp name="HTTPSampler.contentEncoding">UTF-8</stringProp>
           <stringProp name="HTTPSampler.path">/function/librosa-fn</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -171,7 +174,7 @@ return delay as long</stringProp>
           </elementProp>
         </HTTPSamplerProxy>
         <hashTree/>
-        <JSR223Timer guiclass="TestBeanGUI" testclass="JSR223Timer" testname="JSR223 Timer" enabled="true">
+        <JSR223Timer guiclass="TestBeanGUI" testclass="JSR223Timer" testname="JSR223 Timer" enabled="false">
           <stringProp name="scriptLanguage">groovy</stringProp>
           <stringProp name="parameters"></stringProp>
           <stringProp name="filename"></stringProp>
@@ -186,7 +189,7 @@ double delay = -mean * Math.log(1 - random)
 return delay as long</stringProp>
         </JSR223Timer>
         <hashTree/>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="ffmpeg-1 (Cut Clips)" enabled="true">
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="ffmpeg-1 (Cut Clips)" enabled="false">
           <stringProp name="HTTPSampler.contentEncoding">UTF-8</stringProp>
           <stringProp name="HTTPSampler.path">/function/ffmpeg-1</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -204,7 +207,7 @@ return delay as long</stringProp>
           </elementProp>
         </HTTPSamplerProxy>
         <hashTree/>
-        <JSR223Timer guiclass="TestBeanGUI" testclass="JSR223Timer" testname="JSR223 Timer" enabled="true">
+        <JSR223Timer guiclass="TestBeanGUI" testclass="JSR223Timer" testname="JSR223 Timer" enabled="false">
           <stringProp name="scriptLanguage">groovy</stringProp>
           <stringProp name="parameters"></stringProp>
           <stringProp name="filename"></stringProp>
@@ -219,7 +222,7 @@ double delay = -mean * Math.log(1 - random)
 return delay as long</stringProp>
         </JSR223Timer>
         <hashTree/>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="ffmpeg-2 (Downsample/Compress)" enabled="true">
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="ffmpeg-2 (Downsample/Compress)" enabled="false">
           <stringProp name="HTTPSampler.contentEncoding">UTF-8</stringProp>
           <stringProp name="HTTPSampler.path">/function/ffmpeg-2</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -237,7 +240,7 @@ return delay as long</stringProp>
           </elementProp>
         </HTTPSamplerProxy>
         <hashTree/>
-        <JSR223Timer guiclass="TestBeanGUI" testclass="JSR223Timer" testname="JSR223 Timer" enabled="true">
+        <JSR223Timer guiclass="TestBeanGUI" testclass="JSR223Timer" testname="JSR223 Timer" enabled="false">
           <stringProp name="scriptLanguage">groovy</stringProp>
           <stringProp name="parameters"></stringProp>
           <stringProp name="filename"></stringProp>
@@ -252,7 +255,7 @@ double delay = -mean * Math.log(1 - random)
 return delay as long</stringProp>
         </JSR223Timer>
         <hashTree/>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="ffmpeg-3 (Extract Frames)" enabled="true">
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="ffmpeg-3 (Extract Frames)" enabled="false">
           <stringProp name="HTTPSampler.contentEncoding">UTF-8</stringProp>
           <stringProp name="HTTPSampler.path">/function/ffmpeg-3</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -270,7 +273,7 @@ return delay as long</stringProp>
           </elementProp>
         </HTTPSamplerProxy>
         <hashTree/>
-        <JSR223Timer guiclass="TestBeanGUI" testclass="JSR223Timer" testname="JSR223 Timer" enabled="true">
+        <JSR223Timer guiclass="TestBeanGUI" testclass="JSR223Timer" testname="JSR223 Timer" enabled="false">
           <stringProp name="scriptLanguage">groovy</stringProp>
           <stringProp name="parameters"></stringProp>
           <stringProp name="filename"></stringProp>
@@ -285,7 +288,7 @@ double delay = -mean * Math.log(1 - random)
 return delay as long</stringProp>
         </JSR223Timer>
         <hashTree/>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="deepspeech-fn (Speech-to-Text)" enabled="true">
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="deepspeech-fn (Speech-to-Text)" enabled="false">
           <stringProp name="HTTPSampler.contentEncoding">UTF-8</stringProp>
           <stringProp name="HTTPSampler.path">/function/deepspeech-fn</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -303,7 +306,7 @@ return delay as long</stringProp>
           </elementProp>
         </HTTPSamplerProxy>
         <hashTree/>
-        <JSR223Timer guiclass="TestBeanGUI" testclass="JSR223Timer" testname="JSR223 Timer" enabled="true">
+        <JSR223Timer guiclass="TestBeanGUI" testclass="JSR223Timer" testname="JSR223 Timer" enabled="false">
           <stringProp name="scriptLanguage">groovy</stringProp>
           <stringProp name="parameters"></stringProp>
           <stringProp name="filename"></stringProp>
@@ -318,7 +321,7 @@ double delay = -mean * Math.log(1 - random)
 return delay as long</stringProp>
         </JSR223Timer>
         <hashTree/>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="object-detector (YOLOv4)" enabled="true">
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="object-detector (YOLOv4)" enabled="false">
           <stringProp name="HTTPSampler.contentEncoding">UTF-8</stringProp>
           <stringProp name="HTTPSampler.path">/function/object-detector</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>

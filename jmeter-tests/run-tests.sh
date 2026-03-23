@@ -1,10 +1,14 @@
 #!/bin/bash
 # ============================================================================
-# VideoSearcher OpenFaaS — JMeter Load Test Runner
+# VideoSearcher OpenFaaS — JMeter Stage-1 Trigger Load Test Runner
 # ============================================================================
 #
 # Runs the JMeter test plan at multiple concurrency levels (5, 10, 15 users)
-# with 20-second think time between requests, simulating realistic user behavior.
+# with 20-second think time between requests.
+#
+# Important:
+#   This plan triggers ONLY the first stage (ffmpeg-0).
+#   Remaining stages are chained asynchronously via SQS by OpenFaaS functions.
 #
 # Usage:
 #   ./run-tests.sh                     # Run all 3 load levels (5, 10, 15 users)
@@ -14,9 +18,12 @@
 # Prerequisites:
 #   - JMeter installed (brew install jmeter)
 #   - OpenFaaS gateway accessible at http://127.0.0.1:8080
-#   - All 7 VideoSearcher functions deployed
+#   - OpenFaaS functions deployed (at minimum ffmpeg-0)
+#   - Queue chaining configured in stack.yml (CURRENT_STAGE/NEXT_QUEUES_JSON)
+#   - An SQS to OpenFaaS connector/consumer active for downstream stages
 #
 # Results are saved to: jmeter-tests/results/<users>-users/
+# Note: JMeter metrics cover stage-1 trigger endpoint latency only.
 # ============================================================================
 
 set -e
@@ -77,7 +84,7 @@ run_test() {
     local report_dir="${run_dir}/report_${timestamp}"
 
     echo "============================================================"
-    echo " Load Test: ${users} Concurrent Users"
+    echo " Load Test: ${users} Concurrent Users (Stage-1 Trigger Only)"
     echo "============================================================"
     echo "  Think Time:  ${THINK_TIME}ms ($(( THINK_TIME / 1000 ))s)"
     echo "  Ramp-up:     ${RAMP_UP}s"
@@ -136,10 +143,11 @@ run_test() {
 main() {
     echo ""
     echo "╔════════════════════════════════════════════════════════════╗"
-    echo "║   VideoSearcher OpenFaaS — JMeter Performance Tests      ║"
+    echo "║ VideoSearcher OpenFaaS — Stage-1 Trigger Performance Test ║"
     echo "╚════════════════════════════════════════════════════════════╝"
     echo ""
     echo "  Gateway:     http://${GATEWAY_HOST}:${GATEWAY_PORT}"
+    echo "  Mode:        JMeter -> ffmpeg-0 only (SQS handles next stages)"
     echo "  Think Time:  ${THINK_TIME}ms"
     echo "  Duration:    ${DURATION}s per level"
     echo "  User Levels: ${USER_LEVELS}"
