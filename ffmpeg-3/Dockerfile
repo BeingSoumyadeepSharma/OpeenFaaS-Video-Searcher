@@ -6,9 +6,23 @@ COPY --from=watchdog /fwatchdog /usr/bin/fwatchdog
 RUN chmod +x /usr/bin/fwatchdog
 
 # System dependencies (from requirements.sys)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg jq \
-    && rm -rf /var/lib/apt/lists/*
+# Use HTTPS mirrors and retry apt operations to avoid transient network failures.
+RUN set -eux; \
+        if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+            sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources; \
+        fi; \
+        if [ -f /etc/apt/sources.list ]; then \
+            sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list; \
+        fi; \
+        for attempt in 1 2 3; do \
+            apt-get update && \
+            apt-get install -y --no-install-recommends --fix-missing \
+                ffmpeg jq && \
+            break; \
+            echo "apt-get failed on attempt ${attempt}, retrying..."; \
+            sleep 5; \
+        done; \
+        rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /home/app/function
 WORKDIR /home/app/function

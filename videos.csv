@@ -1,3 +1,2 @@
 input_video
-s3://cloud-pipeline-loadtest-sharma/vid1.mp4
-s3://cloud-pipeline-loadtest-sharma/vid2.mp4
+s3://cloud-pipeline-loadtest-sharma/video_cut.mp4

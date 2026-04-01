@@ -28,6 +28,112 @@ if [ $EXIT_CODE -eq 0 ]; then
 fi
 
 if [ $EXIT_CODE -eq 0 ] && [ -n "$ROOT_PREFIX" ]; then
+    if [ "${CURRENT_STAGE:-ffmpeg-1}" = "ffmpeg-1" ]; then
+        # ffmpeg-1 produces multiple clips; enqueue one message per clip.
+        CURRENT_STAGE_ENV="${CURRENT_STAGE:-ffmpeg-1}" \
+        RUN_ID_ENV="$RUN_ID" \
+        ROOT_PREFIX_ENV="$ROOT_PREFIX" \
+        LOCAL_OUTPUT_ENV="$LOCAL_OUTPUT" \
+        NEXT_TARGETS_JSON_ENV="${NEXT_QUEUES_JSON:-[]}" \
+        python - <<'PY'
+import glob
+import json
+import os
+import sys
+
+import boto3
+
+
+def join_prefix(root, suffix):
+    return root.rstrip("/") + "/" + suffix.lstrip("/")
+
+
+def load_targets(raw):
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"QUEUE_HELPER: invalid NEXT_QUEUES_JSON: {exc}", file=sys.stderr)
+        return []
+
+    valid = []
+    for item in parsed if isinstance(parsed, list) else []:
+        if not isinstance(item, dict):
+            continue
+        queue_url = item.get("queue_url", "")
+        stage = item.get("stage") or item.get("target_stage") or ""
+        if not queue_url or not stage:
+            continue
+        valid.append({"queue_url": queue_url, "stage": stage})
+    return valid
+
+
+def stage_dir(stage_name):
+    mapping = {
+        "ffmpeg-0": "ffmpeg0",
+        "librosa": "librosa",
+        "ffmpeg-1": "ffmpeg1",
+        "ffmpeg-2": "ffmpeg2",
+        "ffmpeg-3": "ffmpeg3",
+        "deepspeech": "deepspeech",
+        "object-detector": "objdetect",
+    }
+    return mapping.get(stage_name, stage_name)
+
+
+current_stage = os.environ.get("CURRENT_STAGE_ENV", "ffmpeg-1")
+run_id = os.environ.get("RUN_ID_ENV", "")
+root_prefix = os.environ.get("ROOT_PREFIX_ENV", "")
+local_output = os.environ.get("LOCAL_OUTPUT_ENV", "")
+raw_targets = os.environ.get("NEXT_TARGETS_JSON_ENV", "[]")
+
+targets = load_targets(raw_targets)
+if not targets:
+    print("QUEUE_HELPER: no valid next targets configured", file=sys.stderr)
+    sys.exit(0)
+
+output_dir = os.path.dirname(local_output)
+output_base = os.path.basename(local_output)
+clip_pattern = os.path.join(output_dir, output_base + "_*.mp4")
+clip_files = sorted(glob.glob(clip_pattern))
+
+if not clip_files:
+    print(f"QUEUE_HELPER: no clips found for pattern {clip_pattern}", file=sys.stderr)
+    sys.exit(0)
+
+sqs = boto3.client("sqs", region_name=os.environ.get("AWS_DEFAULT_REGION"))
+
+for clip_path in clip_files:
+    clip_name = os.path.basename(clip_path)
+    clip_stem, _ = os.path.splitext(clip_name)
+    # ffmpeg-1 uploads clips under root_prefix (not root_prefix/ffmpeg1/)
+    # because s3_helper uploads the parent directory of LOCAL_OUTPUT.
+    clip_input_uri = join_prefix(root_prefix, clip_name)
+
+    for target in targets:
+        target_stage = target["stage"]
+        out_dir = stage_dir(target_stage)
+        output_uri = join_prefix(root_prefix, f"{out_dir}/{clip_stem}")
+
+        message = {
+            "run_id": run_id,
+            "source_stage": current_stage,
+            "root_prefix": root_prefix,
+            "input": clip_input_uri,
+            "output": output_uri,
+        }
+
+        sqs.send_message(
+            QueueUrl=target["queue_url"],
+            MessageBody=json.dumps(message),
+        )
+
+print(
+    f"QUEUE_HELPER: queued {len(clip_files)} clip message(s) from {current_stage}",
+    file=sys.stderr,
+)
+PY
+        EXIT_CODE=$?
+    else
         python queue_helper.py \
             --current-stage "${CURRENT_STAGE:-ffmpeg-1}" \
             --run-id "$RUN_ID" \
@@ -35,6 +141,7 @@ if [ $EXIT_CODE -eq 0 ] && [ -n "$ROOT_PREFIX" ]; then
             --input "$OUTPUT" \
             --next-targets-json "${NEXT_QUEUES_JSON:-[]}"
         EXIT_CODE=$?
+    fi
 fi
 
 # Clean up this invocation's staging area

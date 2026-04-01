@@ -9,6 +9,7 @@ This project deploys the **VideoSearcher** AI-SPRINT video processing pipeline a
 - [Project Overview](#project-overview)
 - [Architecture](#architecture)
   - [Pipeline Stages](#pipeline-stages)
+  - [Execution Flow and Output Cardinality](#execution-flow-and-output-cardinality)
   - [Classic Watchdog Pattern](#classic-watchdog-pattern)
 - [Design Decisions](#design-decisions)
   - [Why Classic Watchdog (Not of-watchdog)](#why-classic-watchdog-not-of-watchdog)
@@ -45,6 +46,7 @@ This project deploys the **VideoSearcher** AI-SPRINT video processing pipeline a
   - [6. aisprint Import Errors](#6-aisprint-import-errors)
   - [7. JMeter Pipeline Stopping at ffmpeg-1](#7-jmeter-pipeline-stopping-at-ffmpeg-1)
   - [8. Concurrent Request Race Condition (/tmp/s3data)](#8-concurrent-request-race-condition-tmps3data)
+  - [9. Queue Fan-Out S3 Path Mismatch (ffmpeg-1 -> ffmpeg-2)](#9-queue-fan-out-s3-path-mismatch-ffmpeg-1---ffmpeg-2)
 - [Function Details](#function-details)
 - [Configuration Reference](#configuration-reference)
 - [Performance Testing (JMeter)](#performance-testing-jmeter)
@@ -115,6 +117,27 @@ All original scripts use `from aisprint.annotations import annotation` as a deco
                                                   │ speech→text  │     │ YOLOv4 ONNX    │
                                                   └──────────────┘     └────────────────┘
 ```
+
+### Execution Flow and Output Cardinality
+
+The queue-driven execution flow is:
+
+`ffmpeg-0` -> `librosa-fn` -> `ffmpeg-1` -> `ffmpeg-2` -> (`ffmpeg-3` and `deepspeech-fn` in parallel) -> `object-detector` (from `ffmpeg-3` frames)
+
+| Stage | Output per invocation | Multiple outputs in one invocation? |
+|------|------------------------|-------------------------------------|
+| `ffmpeg-0` | `output.tar.gz` | No |
+| `librosa-fn` | `output.tar.gz` | No |
+| `ffmpeg-1` | `clip_0.mp4`, `clip_1.mp4`, ... | **Yes** |
+| `ffmpeg-2` | `<clip>.tar.gz` | No |
+| `ffmpeg-3` | `<base>-1.jpg`, `<base>-2.jpg`, ... | **Yes** |
+| `deepspeech-fn` | `<base>.tar.gz` (clip + transcript bundle) | No |
+| `object-detector` | `<frame>.jpg` (annotated image) | No |
+
+Important:
+
+- Functions that generate multiple outputs in a single invocation are **`ffmpeg-1`** and **`ffmpeg-3`**.
+- `object-detector` produces one output per invocation, but can run many times because `ffmpeg-3` now fans out one queue message per frame.
 
 ### Classic Watchdog Pattern
 
@@ -792,6 +815,45 @@ S3_STAGING = os.environ.get("S3_STAGING", "/tmp/s3data")
 Cleanup only removes that invocation's directory (`rm -rf "$S3_STAGING"`), so concurrent requests on the same pod are fully isolated.
 
 This required rebuilding and redeploying all 7 Docker images.
+
+### 9. Queue Fan-Out S3 Path Mismatch (ffmpeg-1 -> ffmpeg-2)
+
+**Problem**: After enabling multi-clip fan-out, only part of the downstream pipeline behaved correctly. `ffmpeg-2`, `ffmpeg-3`, and `deepspeech` were inconsistent and object detection could stall with no new outputs.
+
+**Symptoms observed**:
+
+- `ffmpeg-1` produced multiple clips successfully
+- many downstream invocations returned HTTP 200 but produced empty or invalid artifacts
+- extracted `ffmpeg2/*.tar.gz` files were tiny/empty in some runs
+- counters on downstream stages did not match expected artifact growth
+
+**Root Cause**: In the fan-out message built by `ffmpeg-1/entry.sh`, clip inputs were queued as:
+
+```text
+s3://<bucket>/<run_id>/ffmpeg1/<clip_name>.mp4
+```
+
+But because of the current `s3_helper.py upload` behavior, ffmpeg-1 clip files are uploaded at run-root level:
+
+```text
+s3://<bucket>/<run_id>/<clip_name>.mp4
+```
+
+So `ffmpeg-2` received non-existent input keys, leading to bad downstream artifacts.
+
+**Fix**:
+
+1. Updated `ffmpeg-1/entry.sh` fan-out mapping to publish clip input URIs from run root.
+2. Rebuilt and pushed `soumyadeeps/ffmpeg-1:latest`.
+3. Redeployed with `faas-cli deploy -f stack.yml`.
+4. Revalidated using an isolated `run_id` and compared function invocation deltas.
+
+**Validation result**:
+
+- `ffmpeg-2`, `ffmpeg-3`, and `deepspeech-fn` increased in parallel after a single seeded run
+- `object-detector` resumed increasing as frame fan-out drained correctly
+
+This fix restores correct multi-clip propagation from ffmpeg-1 into the rest of the queue-driven pipeline.
 
 ---
 
