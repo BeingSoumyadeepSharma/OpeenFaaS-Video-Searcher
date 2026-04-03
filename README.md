@@ -855,6 +855,27 @@ So `ffmpeg-2` received non-existent input keys, leading to bad downstream artifa
 
 This fix restores correct multi-clip propagation from ffmpeg-1 into the rest of the queue-driven pipeline.
 
+### 10. Pipeline Output Overwrites (Data Loss via S3 Race)
+
+**Problem**: Under concurrent processing loads with multiple fan-out chunks, we noticed severe data loss when verifying end-to-end artifact outputs on S3. When viewing AWS S3, pipeline stages like `deepspeech` and `object-detector` only had ONE resulting file per run instead of $N$ (equal to the number of valid clips extracted).
+
+**Root Cause**: The staging queue mechanism driven by `queue_helper.py` lacked context on the unique clip identifier being passed into it. When determining the S3 path for `$OUTPUT` of any target queue, it blindly dumped results using static stage names (e.g., `s3://bucket/run_id/deepspeech/`). This forced concurrent workers from a fan-out stage to overwrite each other’s uploads.
+
+**Fix**: Updated `_stage_output_uri` and `enqueue_next` in `queue_helper.py` to dynamically parse the unique input base block (e.g., `clip_0`) and propagate it explicitly to the S3 output URI map. Now, every concurrent fan-out correctly writes to a fully unique S3 key path.
+
+### 11. Cascading Bug: Fan-Out Path Mismatch Starvation
+
+**Problem**: After applying the data loss fix from issue 10 above, developers noticed that the `object-detector` stage inexplicably froze, receiving 0 messages from the event queue despite `ffmpeg-3` reporting HTTP 200 Successes under `sqs-bridge` monitoring. 
+
+**Root Cause**: Because `queue_helper.py` now routed artifacts into dedicated subfolders (`s3://bucket/run_id/ffmpeg1/clip_0.mp4` instead of `s3://bucket/run_id/clip_0.mp4`), embedded Python SQS publishing loops residing directly inside `ffmpeg-1/entry.sh` and `ffmpeg-3/entry.sh` were feeding incorrect absolute `s3://` URIs pointing to the root structure to downstream components. 
+- `ffmpeg-2` received instructions to evaluate a non-existent file in the root context, leading it to silently execute `tar` on a non-existent source. This synthesized into an empty 45-byte `.tar.gz` archive. 
+- `ffmpeg-3` unpacked the resulting empty artifact, outputting zero valid extracted JPG frames. Since the `frame_files` glob was empty, the queue helper gracefully executed `sys.exit(0)` completely bypassing the SQS publish event towards `object-detector` queue routes, starving it!
+
+**Fix**:
+1. Updated the embedded `entry.sh` script for `ffmpeg-3` to prefix its generated queue metadata to downstream targets with `f"ffmpeg3/{frame_name}"`.
+2. Updated the embedded `entry.sh` script for `ffmpeg-1` identically, prefixing explicit `ffmpeg1/` keys so `ffmpeg-2` accurately downloads the source chunk.
+3. Rebuilt & redeployed `soumyadeeps/ffmpeg-1` and `soumyadeeps/ffmpeg-3`. Both data isolation and scaling behavior act healthily now.
+
 ---
 
 ## Function Details
