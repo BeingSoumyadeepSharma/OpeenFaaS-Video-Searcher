@@ -40,10 +40,13 @@ def _join_s3_prefix(root_prefix, suffix):
     return root_prefix.rstrip("/") + "/" + suffix.lstrip("/")
 
 
-def _stage_output_uri(root_prefix, stage_name):
+def _stage_output_uri(root_prefix, stage_name, base_name=None):
     if stage_name not in STAGE_OUTPUT_DIR:
         raise ValueError(f"Unknown stage for output mapping: {stage_name}")
-    return _join_s3_prefix(root_prefix, STAGE_OUTPUT_DIR[stage_name])
+    uri = _join_s3_prefix(root_prefix, STAGE_OUTPUT_DIR[stage_name])
+    if base_name:
+        uri = _join_s3_prefix(uri, base_name)
+    return uri
 
 
 def _produced_artifact_uri(stage_name, output_base_uri):
@@ -84,6 +87,7 @@ def enqueue_next(current_stage, run_id, root_prefix, output_base_uri, next_targe
     sqs = boto3.client("sqs", region_name=os.environ.get("AWS_DEFAULT_REGION"))
 
     produced_input_uri = _produced_artifact_uri(current_stage, output_base_uri)
+    base_name = os.path.basename(output_base_uri.rstrip("/"))
 
     for target in targets:
         body = {
@@ -91,7 +95,7 @@ def enqueue_next(current_stage, run_id, root_prefix, output_base_uri, next_targe
             "source_stage": current_stage,
             "root_prefix": root_prefix,
             "input": produced_input_uri,
-            "output": _stage_output_uri(root_prefix, target["stage"]),
+            "output": _stage_output_uri(root_prefix, target["stage"], base_name),
         }
         sqs.send_message(QueueUrl=target["queue_url"], MessageBody=json.dumps(body))
         print(

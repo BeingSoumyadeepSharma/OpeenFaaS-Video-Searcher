@@ -105,9 +105,9 @@ sqs = boto3.client("sqs", region_name=os.environ.get("AWS_DEFAULT_REGION"))
 for frame_path in frame_files:
     frame_name = os.path.basename(frame_path)
     frame_stem, _ = os.path.splitext(frame_name)
-    # ffmpeg-3 uploads frames under root_prefix (not root_prefix/ffmpeg3/)
-    # because s3_helper uploads the parent directory of LOCAL_OUTPUT.
-    frame_input_uri = join_prefix(root_prefix, frame_name)
+    # With the recent queue_helper fix, frames are now correctly placed
+    # in the ffmpeg3/ folder instead of the root. Update the SQS payload to match.
+    frame_input_uri = join_prefix(root_prefix, f"ffmpeg3/{frame_name}")
 
     for target in targets:
         target_stage = target["stage"]

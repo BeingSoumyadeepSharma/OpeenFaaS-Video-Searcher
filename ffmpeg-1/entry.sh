@@ -105,9 +105,9 @@ sqs = boto3.client("sqs", region_name=os.environ.get("AWS_DEFAULT_REGION"))
 for clip_path in clip_files:
     clip_name = os.path.basename(clip_path)
     clip_stem, _ = os.path.splitext(clip_name)
-    # ffmpeg-1 uploads clips under root_prefix (not root_prefix/ffmpeg1/)
-    # because s3_helper uploads the parent directory of LOCAL_OUTPUT.
-    clip_input_uri = join_prefix(root_prefix, clip_name)
+    # With the recent queue_helper fix, clips are now correctly placed
+    # in the ffmpeg1/ folder instead of the root. Update the SQS payload to match.
+    clip_input_uri = join_prefix(root_prefix, f"ffmpeg1/{clip_name}")
 
     for target in targets:
         target_stage = target["stage"]
