@@ -1,10 +1,10 @@
 #!/bin/bash
 # ============================================================================
-# VideoSearcher OpenFaaS — JMeter Stage-1 Trigger Load Test Runner
+# VideoSearcher OpenFaaS — Locust Stage-1 Trigger Load Test Runner
 # ============================================================================
 #
-# Runs the JMeter test plan at multiple concurrency levels (5, 10, 15 users)
-# with 20-second think time between requests.
+# Runs the Locust test plan at multiple concurrency levels (5, 10, 15 users)
+# with exponential think time between requests (default mean 20s).
 #
 # Important:
 #   This plan triggers ONLY the first stage (ffmpeg-0).
@@ -16,49 +16,43 @@
 #   ./run-tests.sh 5 10                # Run with 5 and 10 users
 #
 # Prerequisites:
-#   - JMeter installed (brew install jmeter)
+#   - Locust installed (pip install locust)
 #   - OpenFaaS gateway accessible at http://127.0.0.1:8080
 #   - OpenFaaS functions deployed (at minimum ffmpeg-0)
-#   - Queue chaining configured in stack.yml (CURRENT_STAGE/NEXT_QUEUES_JSON)
-#   - An SQS to OpenFaaS connector/consumer active for downstream stages
 #
-# Results are saved to: jmeter-tests/results/<users>-users/
-# Note: JMeter metrics cover stage-1 trigger endpoint latency only.
+# Results are saved to: locust-tests/results/<users>-users/
 # ============================================================================
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TEST_PLAN="${SCRIPT_DIR}/videosearcher-load-test.jmx"
+LOCUST_FILE="${SCRIPT_DIR}/locustfile.py"
 RESULTS_DIR="${SCRIPT_DIR}/results"
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 GATEWAY_HOST="${GATEWAY_HOST:-a86db78a1498941edbb5952f01041129-854708034.us-east-1.elb.amazonaws.com}"
 GATEWAY_PORT="${GATEWAY_PORT:-8080}"
-THINK_TIME="${THINK_TIME:-20000}"          # 20 seconds in milliseconds
+export THINK_TIME_S="${THINK_TIME_S:-20.0}" # Think time mean in seconds
 RAMP_UP="${RAMP_UP:-10}"                   # Ramp-up period in seconds
-DURATION="${DURATION:-300}"                # Test duration: 5 minutes per level
+DURATION="${DURATION:-300}"                # Test duration per level in seconds
 USER_LEVELS="${@:-5 10 15}"                # Default: 5, 10, 15 concurrent users
 
 # ── Preflight checks ──────────────────────────────────────────────────────────
 check_prerequisites() {
     echo "=== Preflight Checks ==="
 
-    # Check JMeter
-    if ! command -v jmeter &>/dev/null; then
-        echo "ERROR: JMeter not found. Install with: brew install jmeter"
+    if ! command -v locust &>/dev/null; then
+        echo "ERROR: Locust not found. Install with: pip3 install locust"
         exit 1
     fi
-    echo "  ✓ JMeter: $(jmeter --version 2>&1 | head -1)"
+    echo "  ✓ Locust: $(locust -V)"
 
-    # Check test plan exists
-    if [ ! -f "$TEST_PLAN" ]; then
-        echo "ERROR: Test plan not found: $TEST_PLAN"
+    if [ ! -f "$LOCUST_FILE" ]; then
+        echo "ERROR: Locust test plan not found: $LOCUST_FILE"
         exit 1
     fi
-    echo "  ✓ Test plan: $TEST_PLAN"
+    echo "  ✓ Test plan: $LOCUST_FILE"
 
-    # Check OpenFaaS gateway is reachable
     if curl -s --connect-timeout 5 "http://${GATEWAY_HOST}:${GATEWAY_PORT}/healthz" &>/dev/null; then
         echo "  ✓ OpenFaaS gateway: http://${GATEWAY_HOST}:${GATEWAY_PORT}"
     else
@@ -79,62 +73,53 @@ run_test() {
     local users=$1
     local run_dir="${RESULTS_DIR}/${users}-users"
     local timestamp=$(date +%Y%m%d_%H%M%S)
-    local result_file="${run_dir}/results_${timestamp}.jtl"
-    local log_file="${run_dir}/jmeter_${timestamp}.log"
-    local report_dir="${run_dir}/report_${timestamp}"
+    local csv_prefix="${run_dir}/results_${timestamp}"
+    local log_file="${run_dir}/locust_${timestamp}.log"
+    local report_file="${run_dir}/report_${timestamp}.html"
+
+    # Calculate spawn rate: users / RAMP_UP
+    local spawn_rate=$(awk "BEGIN {print $users / $RAMP_UP}")
+    if (( $(echo "$spawn_rate <= 0" | awk '{print ($1 <= 0) ? 1 : 0}') )); then
+        spawn_rate=1
+    fi
 
     echo "============================================================"
     echo " Load Test: ${users} Concurrent Users (Stage-1 Trigger Only)"
     echo "============================================================"
-    echo "  Think Time:  ${THINK_TIME}ms ($(( THINK_TIME / 1000 ))s)"
-    echo "  Ramp-up:     ${RAMP_UP}s"
+    echo "  Think Time:  ${THINK_TIME_S}s (Mean)"
+    echo "  Spawn Rate:  ${spawn_rate} users/s (Ramp-up: ${RAMP_UP}s)"
     echo "  Duration:    ${DURATION}s ($(( DURATION / 60 ))m)"
-    echo "  Results:     ${result_file}"
-    echo "  Report:      ${report_dir}"
+    echo "  Results:     ${csv_prefix}_stats.csv"
+    echo "  HTML Report: ${report_file}"
     echo "------------------------------------------------------------"
 
     # Create output directory
     mkdir -p "$run_dir"
 
-    # Run JMeter in non-GUI (CLI) mode
+    # Run Locust in headless mode
     echo "  Starting test at $(date '+%H:%M:%S')..."
-    jmeter -n \
-        -t "$TEST_PLAN" \
-        -l "$result_file" \
-        -j "$log_file" \
-        -Jusers="${users}" \
-        -Jrampup="${RAMP_UP}" \
-        -Jduration="${DURATION}" \
-        -Jthinktime="${THINK_TIME}" \
-        -Jhost="${GATEWAY_HOST}" \
-        -Jport="${GATEWAY_PORT}" \
-        -e -o "$report_dir" \
-        2>&1 | tail -20
+    locust -f "$LOCUST_FILE" \
+        --headless \
+        -u "$users" \
+        -r "$spawn_rate" \
+        -t "${DURATION}s" \
+        --host "http://${GATEWAY_HOST}:${GATEWAY_PORT}" \
+        --csv "$csv_prefix" \
+        --html "$report_file" \
+        --logfile "$log_file" \
+        --loglevel INFO 2>&1 | tail -20
 
     echo ""
     echo "  ✓ Test completed at $(date '+%H:%M:%S')"
-    echo "  ✓ Raw results:   ${result_file}"
-    echo "  ✓ HTML report:   ${report_dir}/index.html"
-    echo "  ✓ JMeter log:    ${log_file}"
+    echo "  ✓ CSV stats:     ${csv_prefix}_stats.csv"
+    echo "  ✓ HTML report:   ${report_file}"
+    echo "  ✓ Locust log:    ${log_file}"
     echo ""
-
-    # Print quick summary from the .jtl file
-    if [ -f "$result_file" ]; then
+    
+    if [ -f "${csv_prefix}_stats.csv" ]; then
         echo "  ── Quick Summary ──"
-        local total=$(tail -n +2 "$result_file" | wc -l | tr -d ' ')
-        local success=$(tail -n +2 "$result_file" | awk -F',' '{print $8}' | grep -c "true" || echo "0")
-        local failed=$(( total - success ))
-        echo "  Total requests:  ${total}"
-        echo "  Successful:      ${success}"
-        echo "  Failed:          ${failed}"
-        if [ "$total" -gt 0 ]; then
-            local avg_time=$(tail -n +2 "$result_file" | awk -F',' '{sum+=$2; n++} END {if(n>0) printf "%.0f", sum/n; else print "N/A"}')
-            local min_time=$(tail -n +2 "$result_file" | awk -F',' 'NR==1{min=$2} $2<min{min=$2} END {print min}')
-            local max_time=$(tail -n +2 "$result_file" | awk -F',' 'NR==1{max=$2} $2>max{max=$2} END {print max}')
-            echo "  Avg response:    ${avg_time}ms"
-            echo "  Min response:    ${min_time}ms"
-            echo "  Max response:    ${max_time}ms"
-        fi
+        # Print summary line of aggregated data
+        grep "Aggregated" "${csv_prefix}_stats.csv" | awk -F',' '{print "  Total requests:  " $3 "\n  Failures:        " $4}'
         echo ""
     fi
 }
@@ -143,12 +128,12 @@ run_test() {
 main() {
     echo ""
     echo "╔════════════════════════════════════════════════════════════╗"
-    echo "║ VideoSearcher OpenFaaS — Stage-1 Trigger Performance Test ║"
+    echo "║ VideoSearcher OpenFaaS — Stage-1 Trigger Locust Test      ║"
     echo "╚════════════════════════════════════════════════════════════╝"
     echo ""
     echo "  Gateway:     http://${GATEWAY_HOST}:${GATEWAY_PORT}"
-    echo "  Mode:        JMeter -> ffmpeg-0 only (SQS handles next stages)"
-    echo "  Think Time:  ${THINK_TIME}ms"
+    echo "  Mode:        Locust -> ffmpeg-0 only (SQS handles next stages)"
+    echo "  Think Time:  ${THINK_TIME_S}s (Mean)"
     echo "  Duration:    ${DURATION}s per level"
     echo "  User Levels: ${USER_LEVELS}"
     echo ""
@@ -173,9 +158,9 @@ main() {
     echo ""
     echo " To view HTML reports, open in a browser:"
     for users in $USER_LEVELS; do
-        local report_dir=$(ls -td "${RESULTS_DIR}/${users}-users/report_"* 2>/dev/null | head -1)
-        if [ -n "$report_dir" ]; then
-            echo "   ${users} users: open ${report_dir}/index.html"
+        local report_file=$(ls -t "${RESULTS_DIR}/${users}-users/report_"*.html 2>/dev/null | head -1)
+        if [ -n "$report_file" ]; then
+            echo "   ${users} users: open ${report_file}"
         fi
     done
     echo ""

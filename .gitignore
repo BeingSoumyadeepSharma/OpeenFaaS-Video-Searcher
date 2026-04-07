@@ -46,6 +46,9 @@ nohup.out
 jmeter-tests/results/
 *.jtl
 
+# === Locust test results (generated) ===
+locust-tests/results/
+
 # === Extra Files ===
 out.tar.gz
 *.mp4

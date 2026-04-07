@@ -920,13 +920,13 @@ This fix restores correct multi-clip propagation from ffmpeg-1 into the rest of 
 
 ---
 
-## Performance Testing (JMeter)
+## Performance Testing (JMeter & Locust)
 
-Performance tests are executed using **Apache JMeter** to measure response times, throughput, and error rates of the deployed OpenFaaS functions under different load levels.
+Performance tests are executed using **Apache JMeter** or **Locust** to measure response times, throughput, and error rates of the deployed OpenFaaS functions under different load levels.
 
 ### Test Plan Overview
 
-The test plan (`jmeter-tests/videosearcher-load-test.jmx`) simulates realistic user behavior with **S3-backed data flow** between pipeline stages:
+The test plans (`jmeter-tests/videosearcher-load-test.jmx` and `locust-tests/locustfile.py`) simulate realistic user behavior with **S3-backed data flow** between pipeline stages:
 
 1. A Groovy PreProcessor generates a unique `runId` (UUID) and `baseOutput` S3 prefix at the start of each iteration
 2. Each virtual user sends a POST request with S3 input/output paths to the function endpoint
@@ -978,20 +978,27 @@ Note: The test processes only the first clip (`clip_0`) through the later stages
 
 The testing strategy follows the principle of **starting with a low number of users** (5) and progressively increasing (10, then 15) to observe how the system behaves under increasing load.
 
-### Installing JMeter
+### Installing Tools
 
 ```bash
-# macOS
+# macOS - JMeter
 brew install jmeter
 
 # Verify installation
 jmeter --version
+
+# Python - Locust
+pip install locust
+
+# Verify installation
+locust -V
 ```
 
 ### Running the Tests
 
-**Option 1: Use the automated runner script** (recommended)
+**Option 1: Use the automated runner scripts** (recommended)
 
+For JMeter:
 ```bash
 cd jmeter-tests
 
@@ -1003,8 +1010,20 @@ cd jmeter-tests
 ./run-tests.sh 5 10       # 5 and 10 users
 ```
 
-The script will:
-- Check prerequisites (JMeter installed, gateway reachable)
+For Locust:
+```bash
+cd locust-tests
+
+# Run all 3 load levels (5 → 10 → 15 users)
+./run-tests.sh
+
+# Run a specific load level only
+./run-tests.sh 5          # 5 users only
+./run-tests.sh 5 10       # 5 and 10 users
+```
+
+The scripts will:
+- Check prerequisites (JMeter/Locust installed, gateway reachable)
 - Run each load level for 5 minutes
 - Wait 30 seconds between levels for system stabilization
 - Generate HTML reports and print a quick summary
@@ -1053,13 +1072,14 @@ In the GUI you can:
 
 ### Analyzing Results
 
-**HTML Reports**: JMeter auto-generates comprehensive HTML reports in each results directory:
+**HTML Reports**: JMeter and Locust auto-generate comprehensive HTML reports in their results directory:
 
 ```bash
-# Open the HTML report in your browser
+# Open the JMeter HTML report in your browser
 open jmeter-tests/results/5-users/report/index.html
-open jmeter-tests/results/10-users/report/index.html
-open jmeter-tests/results/15-users/report/index.html
+
+# Open the Locust HTML report in your browser
+open locust-tests/results/5-users/report_*.html
 ```
 
 The HTML report includes:
@@ -1096,15 +1116,13 @@ jmeter-tests/
 ├── run-tests.sh                  # Automated runner: runs tests at 5, 10, 15 users
 ├── compare-results.sh            # Compares results across load levels
 └── results/                      # Test output (generated, gitignored)
-    ├── 5-users/
-    │   ├── results_<timestamp>.jtl    # Raw results (CSV)
-    │   ├── jmeter_<timestamp>.log     # JMeter log
-    │   └── report_<timestamp>/        # HTML report
-    │       └── index.html
-    ├── 10-users/
-    │   └── ...
-    └── 15-users/
-        └── ...
+    └── ...
+
+locust-tests/
+├── locustfile.py                 # Locust test plan
+├── run-tests.sh                  # Automated runner: runs tests at 5, 10, 15 users
+└── results/                      # Test output (generated, gitignored)
+    └── ...
 ```
 
 ### Configurable Parameters
