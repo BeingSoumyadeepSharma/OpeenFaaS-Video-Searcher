@@ -45,10 +45,13 @@ nohup.out
 # === JMeter test results (generated) ===
 jmeter-tests/results/
 *.jtl
+ec2-jmeter/jmeter-tests/results/
 
 # === Locust test results (generated) ===
 locust-tests/results/
+ec2-locust/locust-tests/results/
 
 # === Extra Files ===
 out.tar.gz
 *.mp4
+*.tar.gz

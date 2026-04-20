@@ -485,9 +485,9 @@
                     \toprule
                     \textbf{Users} & \textbf{Runs} & \textbf{Avg (ms)} & \textbf{Max (ms)} & \textbf{Fail} \\
                     \midrule
-                    5   & 76  & 1708 & 2273 & 0\% \\
-                    10  & 143 & 1837 & 3297 & 0\% \\
-                    15  & 200 & 2325 & 5147 & 0\% \\
+                    5   & 61  & 1521 & 1791 & 0\% \\
+                    10  & 127 & 1669 & 2928 & 0\% \\
+                    15  & 202 & 2028 & 4226 & 0\% \\
                     \bottomrule
                 \end{tabular}}
                 \caption{JMeter execution metrics.}
@@ -519,7 +519,7 @@
                         fill=OpenFaaSLight,
                         draw=OpenFaaSDark
                     ]
-                    \addplot coordinates {(5,1708) (10,1837) (15,2325)};
+                    \addplot coordinates {(5,1521) (10,1669) (15,2028)};
                     \end{axis}
                 \end{tikzpicture}
                 \caption{JMeter Latency trend.}
@@ -539,9 +539,9 @@
                     \toprule
                     \textbf{Users} & \textbf{Runs} & \textbf{Avg (ms)} & \textbf{Max (ms)} & \textbf{Fail} \\
                     \midrule
-                    5   & 78  & 1717 & 3505 & 0 \\
-                    10  & 145 & 2046 & 6008 & 1 \\
-                    15  & 136 & 2980 & 9153 & 0 \\
+                    5   & 75  & 1494 & 1881 & 0 \\
+                    10  & 139 & 1632 & 3481 & 0 \\
+                    15  & 211 & 2280 & 8310 & 0 \\
                     \bottomrule
                 \end{tabular}}
                 \caption{Locust metrics.}
@@ -549,7 +549,7 @@
             \vspace{0.2cm}
             \begin{itemize}[<+->]
                 \item Python-based model logged higher tail latency.
-                \item Single failure detected ($<1\%$) under peak load.
+                \item Handled all requests successfully with 0 failures under peak load.
             \end{itemize}
         \end{column}
         \begin{column}{0.48\textwidth}
@@ -573,7 +573,7 @@
                         fill=OpenFaaSLight,
                         draw=OpenFaaSDark
                     ]
-                    \addplot coordinates {(5,1717) (10,2046) (15,2980)};
+                    \addplot coordinates {(5,1494) (10,1632) (15,2280)};
                     \end{axis}
                 \end{tikzpicture}
                 \caption{Locust Latency trend.}
